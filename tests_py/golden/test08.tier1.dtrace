@@ -1,0 +1,1905 @@
+decl-version 2.0
+var-comparability none
+
+ppt ..main():::ENTER
+ppt-type enter
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rsi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rcx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r8
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r9
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack1
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack2
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack3
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..stack_read():::ENTER
+ppt-type enter
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rsi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rcx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r8
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r9
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack1
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack2
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack3
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..stack_read():::EXIT0
+ppt-type subexit
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rsi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rcx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r8
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r9
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack1
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack2
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack3
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..heap_read():::ENTER
+ppt-type enter
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rsi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rcx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r8
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r9
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack1
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack2
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack3
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..heap_read():::EXIT0
+ppt-type subexit
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rsi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rcx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r8
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r9
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack1
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack2
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack3
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..main():::EXIT0
+ppt-type subexit
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rsi
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rdx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable rcx
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r8
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable r9
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack1
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack2
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable stack3
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+..main():::ENTER
+this_invocation_nonce
+0
+rax
+0
+1
+rdi
+1
+1
+rsi
+140733194432256
+1
+rdx
+140733194432000
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+0
+1
+stack1
+0
+1
+stack2
+0
+1
+stack3
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+1
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+140733194432000
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+4294967296
+1
+stack1
+0
+1
+stack2
+0
+1
+stack3
+0
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+1
+rax
+1
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+0
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+4294967296
+1
+stack1
+0
+1
+stack2
+0
+1
+stack3
+0
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+2
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+0
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+4294967296
+1
+stack1
+0
+1
+stack2
+0
+1
+stack3
+1
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+2
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+0
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+4294967296
+1
+stack1
+0
+1
+stack2
+0
+1
+stack3
+1
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+3
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+0
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+8589934593
+1
+stack1
+0
+1
+stack2
+4294967296
+1
+stack3
+1
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+3
+rax
+3
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+1
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+8589934593
+1
+stack1
+0
+1
+stack2
+4294967296
+1
+stack3
+1
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+4
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+3
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+8589934593
+1
+stack1
+0
+1
+stack2
+4294967296
+1
+stack3
+4
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+4
+rax
+2
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+3
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+8589934593
+1
+stack1
+0
+1
+stack2
+4294967296
+1
+stack3
+4
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+5
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+3
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+12884901890
+1
+stack1
+0
+1
+stack2
+8589934592
+1
+stack3
+6
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+5
+rax
+5
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+2
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+12884901890
+1
+stack1
+0
+1
+stack2
+8589934592
+1
+stack3
+6
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+6
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+6
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+12884901890
+1
+stack1
+0
+1
+stack2
+8589934592
+1
+stack3
+11
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+6
+rax
+4
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+6
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+12884901890
+1
+stack1
+0
+1
+stack2
+8589934592
+1
+stack3
+11
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+7
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+6
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+17179869187
+1
+stack1
+0
+1
+stack2
+12884901888
+1
+stack3
+15
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+7
+rax
+7
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+3
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+17179869187
+1
+stack1
+0
+1
+stack2
+12884901888
+1
+stack3
+15
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+8
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+9
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+17179869187
+1
+stack1
+0
+1
+stack2
+12884901888
+1
+stack3
+22
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+8
+rax
+6
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+9
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+17179869187
+1
+stack1
+0
+1
+stack2
+12884901888
+1
+stack3
+22
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+9
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+9
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+21474836484
+1
+stack1
+0
+1
+stack2
+17179869184
+1
+stack3
+28
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+9
+rax
+9
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+4
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+21474836484
+1
+stack1
+0
+1
+stack2
+17179869184
+1
+stack3
+28
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+10
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+12
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+21474836484
+1
+stack1
+0
+1
+stack2
+17179869184
+1
+stack3
+37
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+10
+rax
+8
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+12
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+21474836484
+1
+stack1
+0
+1
+stack2
+17179869184
+1
+stack3
+37
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+11
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+12
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+25769803781
+1
+stack1
+0
+1
+stack2
+21474836480
+1
+stack3
+45
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+11
+rax
+11
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+5
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+25769803781
+1
+stack1
+0
+1
+stack2
+21474836480
+1
+stack3
+45
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+12
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+15
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+25769803781
+1
+stack1
+0
+1
+stack2
+21474836480
+1
+stack3
+56
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+12
+rax
+10
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+15
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+25769803781
+1
+stack1
+0
+1
+stack2
+21474836480
+1
+stack3
+56
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+13
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+15
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+30064771078
+1
+stack1
+0
+1
+stack2
+25769803776
+1
+stack3
+66
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+13
+rax
+13
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+6
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+30064771078
+1
+stack1
+0
+1
+stack2
+25769803776
+1
+stack3
+66
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+14
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+18
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+30064771078
+1
+stack1
+0
+1
+stack2
+25769803776
+1
+stack3
+79
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+14
+rax
+12
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+18
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+30064771078
+1
+stack1
+0
+1
+stack2
+25769803776
+1
+stack3
+79
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+15
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+18
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+34359738375
+1
+stack1
+0
+1
+stack2
+30064771072
+1
+stack3
+91
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+15
+rax
+15
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+7
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+34359738375
+1
+stack1
+0
+1
+stack2
+30064771072
+1
+stack3
+91
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+16
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+21
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+34359738375
+1
+stack1
+0
+1
+stack2
+30064771072
+1
+stack3
+106
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+16
+rax
+14
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+21
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+34359738375
+1
+stack1
+0
+1
+stack2
+30064771072
+1
+stack3
+106
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+17
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+21
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+38654705672
+1
+stack1
+0
+1
+stack2
+34359738368
+1
+stack3
+120
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+17
+rax
+17
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+8
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+38654705672
+1
+stack1
+0
+1
+stack2
+34359738368
+1
+stack3
+120
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+18
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+24
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+38654705672
+1
+stack1
+0
+1
+stack2
+34359738368
+1
+stack3
+137
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+18
+rax
+16
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+24
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+38654705672
+1
+stack1
+0
+1
+stack2
+34359738368
+1
+stack3
+137
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+19
+rax
+140733194432472
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+24
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+42949672969
+1
+stack1
+0
+1
+stack2
+38654705664
+1
+stack3
+153
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+19
+rax
+19
+1
+rdi
+140733194432472
+1
+rsi
+140733194432256
+1
+rdx
+9
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+42949672969
+1
+stack1
+0
+1
+stack2
+38654705664
+1
+stack3
+153
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+20
+rax
+0
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+27
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+42949672969
+1
+stack1
+0
+1
+stack2
+38654705664
+1
+stack3
+172
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+20
+rax
+18
+1
+rdi
+0
+1
+rsi
+140733194432256
+1
+rdx
+27
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+42949672969
+1
+stack1
+0
+1
+stack2
+38654705664
+1
+stack3
+172
+1
+
+..main():::EXIT0
+this_invocation_nonce
+0
+rax
+0
+1
+rdi
+4202500
+1
+rsi
+190
+1
+rdx
+27
+1
+rcx
+0
+1
+r8
+0
+1
+r9
+0
+1
+stack0
+0
+1
+stack1
+0
+1
+stack2
+0
+1
+stack3
+0
+1
+

@@ -1,0 +1,777 @@
+decl-version 2.0
+var-comparability implicit
+
+ppt ..main():::ENTER
+ppt-type enter
+
+ppt ..stack_read():::ENTER
+ppt-type enter
+variable arg0
+  var-kind variable
+  dec-type void*
+  rep-type hashcode
+  comparability 1
+variable arg0[..]
+  var-kind array
+  enclosing-var arg0
+  array 1
+  dec-type void*[]
+  rep-type hashcode[]
+  comparability 2
+variable arg0[..].off0
+  var-kind field off0
+  enclosing-var arg0[..]
+  array 1
+  dec-type int[]
+  rep-type int[]
+  comparability 3
+variable arg0[..].off4
+  var-kind field off4
+  enclosing-var arg0[..]
+  array 1
+  dec-type int[]
+  rep-type int[]
+  comparability 3
+
+ppt ..stack_read():::EXIT0
+ppt-type subexit
+variable arg0
+  var-kind variable
+  dec-type void*
+  rep-type hashcode
+  comparability 1
+variable arg0[..]
+  var-kind array
+  enclosing-var arg0
+  array 1
+  dec-type void*[]
+  rep-type hashcode[]
+  comparability 2
+variable arg0[..].off0
+  var-kind field off0
+  enclosing-var arg0[..]
+  array 1
+  dec-type int[]
+  rep-type int[]
+  comparability 3
+variable arg0[..].off4
+  var-kind field off4
+  enclosing-var arg0[..]
+  array 1
+  dec-type int[]
+  rep-type int[]
+  comparability 3
+variable return
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 3
+
+ppt ..heap_read():::ENTER
+ppt-type enter
+variable arg0
+  var-kind variable
+  dec-type void*
+  rep-type hashcode
+  comparability 1
+variable arg0[..]
+  var-kind array
+  enclosing-var arg0
+  array 1
+  dec-type void*[]
+  rep-type hashcode[]
+  comparability 2
+variable arg0[..].off0
+  var-kind field off0
+  enclosing-var arg0[..]
+  array 1
+  dec-type int[]
+  rep-type int[]
+  comparability 3
+
+ppt ..heap_read():::EXIT0
+ppt-type subexit
+variable arg0
+  var-kind variable
+  dec-type void*
+  rep-type hashcode
+  comparability 1
+variable arg0[..]
+  var-kind array
+  enclosing-var arg0
+  array 1
+  dec-type void*[]
+  rep-type hashcode[]
+  comparability 2
+variable arg0[..].off0
+  var-kind field off0
+  enclosing-var arg0[..]
+  array 1
+  dec-type int[]
+  rep-type int[]
+  comparability 3
+variable return
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 3
+
+ppt ..main():::EXIT0
+ppt-type subexit
+variable return
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 1
+
+..main():::ENTER
+this_invocation_nonce
+0
+
+..stack_read():::ENTER
+this_invocation_nonce
+1
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 0 ]
+1
+arg0[..].off4
+[ 1 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+1
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 0 ]
+1
+arg0[..].off4
+[ 1 ]
+1
+return
+1
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+2
+arg0
+536870912
+1
+arg0[..]
+[ 536870912 ]
+1
+arg0[..].off0
+[ 0 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+2
+arg0
+536870912
+1
+arg0[..]
+[ 536870912 ]
+1
+arg0[..].off0
+[ 0 ]
+1
+return
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+3
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 1 ]
+1
+arg0[..].off4
+[ 2 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+3
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 1 ]
+1
+arg0[..].off4
+[ 2 ]
+1
+return
+3
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+4
+arg0
+536870928
+1
+arg0[..]
+[ 536870928 ]
+1
+arg0[..].off0
+[ 1 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+4
+arg0
+536870928
+1
+arg0[..]
+[ 536870928 ]
+1
+arg0[..].off0
+[ 1 ]
+1
+return
+2
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+5
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 2 ]
+1
+arg0[..].off4
+[ 3 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+5
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 2 ]
+1
+arg0[..].off4
+[ 3 ]
+1
+return
+5
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+6
+arg0
+536870944
+1
+arg0[..]
+[ 536870944 ]
+1
+arg0[..].off0
+[ 2 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+6
+arg0
+536870944
+1
+arg0[..]
+[ 536870944 ]
+1
+arg0[..].off0
+[ 2 ]
+1
+return
+4
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+7
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 3 ]
+1
+arg0[..].off4
+[ 4 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+7
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 3 ]
+1
+arg0[..].off4
+[ 4 ]
+1
+return
+7
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+8
+arg0
+536870960
+1
+arg0[..]
+[ 536870960 ]
+1
+arg0[..].off0
+[ 3 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+8
+arg0
+536870960
+1
+arg0[..]
+[ 536870960 ]
+1
+arg0[..].off0
+[ 3 ]
+1
+return
+6
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+9
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 4 ]
+1
+arg0[..].off4
+[ 5 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+9
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 4 ]
+1
+arg0[..].off4
+[ 5 ]
+1
+return
+9
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+10
+arg0
+536870976
+1
+arg0[..]
+[ 536870976 ]
+1
+arg0[..].off0
+[ 4 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+10
+arg0
+536870976
+1
+arg0[..]
+[ 536870976 ]
+1
+arg0[..].off0
+[ 4 ]
+1
+return
+8
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+11
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 5 ]
+1
+arg0[..].off4
+[ 6 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+11
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 5 ]
+1
+arg0[..].off4
+[ 6 ]
+1
+return
+11
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+12
+arg0
+536870992
+1
+arg0[..]
+[ 536870992 ]
+1
+arg0[..].off0
+[ 5 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+12
+arg0
+536870992
+1
+arg0[..]
+[ 536870992 ]
+1
+arg0[..].off0
+[ 5 ]
+1
+return
+10
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+13
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 6 ]
+1
+arg0[..].off4
+[ 7 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+13
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 6 ]
+1
+arg0[..].off4
+[ 7 ]
+1
+return
+13
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+14
+arg0
+536871008
+1
+arg0[..]
+[ 536871008 ]
+1
+arg0[..].off0
+[ 6 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+14
+arg0
+536871008
+1
+arg0[..]
+[ 536871008 ]
+1
+arg0[..].off0
+[ 6 ]
+1
+return
+12
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+15
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 7 ]
+1
+arg0[..].off4
+[ 8 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+15
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 7 ]
+1
+arg0[..].off4
+[ 8 ]
+1
+return
+15
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+16
+arg0
+536871024
+1
+arg0[..]
+[ 536871024 ]
+1
+arg0[..].off0
+[ 7 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+16
+arg0
+536871024
+1
+arg0[..]
+[ 536871024 ]
+1
+arg0[..].off0
+[ 7 ]
+1
+return
+14
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+17
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 8 ]
+1
+arg0[..].off4
+[ 9 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+17
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 8 ]
+1
+arg0[..].off4
+[ 9 ]
+1
+return
+17
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+18
+arg0
+536871040
+1
+arg0[..]
+[ 536871040 ]
+1
+arg0[..].off0
+[ 8 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+18
+arg0
+536871040
+1
+arg0[..]
+[ 536871040 ]
+1
+arg0[..].off0
+[ 8 ]
+1
+return
+16
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+19
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 9 ]
+1
+arg0[..].off4
+[ 10 ]
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+19
+arg0
+140733194432472
+1
+arg0[..]
+[ 140733194432472 ]
+1
+arg0[..].off0
+[ 9 ]
+1
+arg0[..].off4
+[ 10 ]
+1
+return
+19
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+20
+arg0
+536871056
+1
+arg0[..]
+[ 536871056 ]
+1
+arg0[..].off0
+[ 9 ]
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+20
+arg0
+536871056
+1
+arg0[..]
+[ 536871056 ]
+1
+arg0[..].off0
+[ 9 ]
+1
+return
+18
+1
+
+..main():::EXIT0
+this_invocation_nonce
+0
+return
+0
+1
+

@@ -1,3 +1,30 @@
+# Vendored third-party trees, cloned separately
 daikon/
 unicorn-2.0.1/
 fjalar/
+
+# Virtualenv (~100 MB)
+venv/
+
+# Python bytecode - scripts/tracer/ and tests_py/ both generate these
+__pycache__/
+*.pyc
+
+# pytest
+.pytest_cache/
+
+# Generated output. All of it is reproduced by ./test.sh from the sources
+# that ARE tracked, and it is pure noise in a diff:
+#   traces/        .dtrace + .decls + logs, one set per binary per tier
+#   invariants/    Daikon reports
+#   daikon-output/ Kvasir's working directory
+traces/
+invariants/
+daikon-output/
+*.inv.gz
+
+# Compiled test binaries - rebuilt by `make`. The .c sources are tracked.
+*.exe
+
+# NOTE: tests_py/golden/*.dtrace is deliberately NOT ignored. Those are the
+# byte-identity baselines every tier is measured against.

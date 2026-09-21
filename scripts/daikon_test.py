@@ -20,8 +20,16 @@ STACK_BASE = 0x30000
 STACK_LIMIT = 0x1000
 TRACE_PATH = "trace.jsonl"
 DAIKON_PATH = "trace.dtrace"
-EXE_PATH = "./tests/test.exe"
+EXE_PATH = "test.exe"
 DLL_DIR = ".\dll"
+
+# cdecl/stdcall pass ALL arguments on the stack (unlike x86-64 SysV), so
+# this is where every argument this tracer sees comes from. A function's
+# true arity isn't known here, so we always capture a fixed window of
+# NUM_STACK_ARG_SLOTS words - for functions with fewer args, the extra
+# slots read whatever is above the real arguments (same arity-blindness
+# tradeoff as the ELF tracer's stack0.. capture, not a correctness bug).
+NUM_STACK_ARG_SLOTS = 4
 
 # GDT setup
 GDT_ADDR = 0x5000
@@ -48,29 +56,64 @@ def u32(x): return struct.pack("<I", x)
 
 # --- Daikon Trace Writer ---
 class DaikonTraceWriter:
-    # Register names match dump_regs() and read_regs() order.
-    VAR_NAMES = ["eax", "ebx", "ecx", "edx", "esp", "ebp"]
+    """
+    Writes Daikon .dtrace files using `this_invocation_nonce` to pair
+    ENTER/EXIT samples instead of keying by function name. This is the
+    fix borrowed from Daikon's own front-end contract: a nonce uniquely
+    identifies *one call*, not one function, so recursive and re-entrant
+    calls to the same function never clobber each other's orig() values.
+
+    Caller contract (see hook_code):
+      - The caller maintains ITS OWN call stack keyed by return address
+        (native_call_stack / import call tracking already does this).
+      - When a CALL is seen, the caller asks for a fresh nonce via
+        next_nonce() and stores it alongside (func_name, entry_regs) in
+        its own stack, keyed by ret_addr.
+      - When the matching RET is seen, the caller pops that entry and
+        passes the SAME nonce to add_exit(), along with the entry_regs
+        it already had on hand.
+    """
+
+    # Register names match dump_regs() and read_regs() order. esp/ebp are
+    # deliberately excluded - they're an artifact of the emulator's stack
+    # placement, not a property of the program (same reasoning as the ELF
+    # tracer). stackN holds the actual cdecl/stdcall stack arguments.
+    VAR_NAMES = ["eax", "ebx", "ecx", "edx"] + [f"stack{i}" for i in range(NUM_STACK_ARG_SLOTS)]
+    NONCE_VAR = "this_invocation_nonce"
 
     def __init__(self, filepath):
         self.filepath = filepath
         self.declared_ppts = set()   # func_names that have been seen
-        self.data_samples = []       # list of ("enter"|"exit", func_name, regs[, entry_regs])
-        self._call_stack = {}        # func_name -> entry_regs (for orig() values)
+        self.data_samples = []       # list of ("enter"|"exit", func_name, nonce, regs[, entry_regs])
+        self._next_nonce = 1
+
+    # ------------------------------------------------------------------
+    # Nonce allocation
+    # ------------------------------------------------------------------
+    def next_nonce(self):
+        """Allocate a fresh per-invocation id. Call once per CALL seen,
+        BEFORE add_enter, and hold onto it until the matching add_exit."""
+        n = self._next_nonce
+        self._next_nonce += 1
+        return n
 
     # ------------------------------------------------------------------
     # Public API used by hook_code
     # ------------------------------------------------------------------
-    def add_enter(self, func_name, regs):
-        """Record a procedure entry."""
+    def add_enter(self, func_name, nonce, regs):
+        """Record a procedure entry tagged with its unique invocation id."""
         self.declared_ppts.add(func_name)
-        self._call_stack[func_name] = regs
-        self.data_samples.append(("enter", func_name, regs))
+        self.data_samples.append(("enter", func_name, nonce, regs))
 
-    def add_exit(self, func_name, regs):
-        """Record a procedure exit; includes orig() values from matching entry."""
+    def add_exit(self, func_name, nonce, regs, entry_regs):
+        """Record a procedure exit for the SAME nonce as its ENTER.
+        entry_regs must be supplied by the caller (it's exactly what the
+        caller's own ret_addr-keyed call stack already stored at CALL
+        time) -- this class no longer keeps a parallel func_name-keyed
+        stack, which is what let recursive calls overwrite each other's
+        orig() values before."""
         self.declared_ppts.add(func_name)
-        entry_regs = self._call_stack.pop(func_name, regs)
-        self.data_samples.append(("exit", func_name, regs, entry_regs))
+        self.data_samples.append(("exit", func_name, nonce, regs, entry_regs))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -78,6 +121,14 @@ class DaikonTraceWriter:
     def _write_ppt_decl(self, f, ppt_name, ppt_type, include_orig=False):
         f.write(f"ppt {ppt_name}\n")
         f.write(f"ppt-type {ppt_type}\n")
+        # this_invocation_nonce is how Daikon pairs ENTER/EXIT samples
+        # for the SAME call, even when the same function is re-entered
+        # (recursion) before the first call returns.
+        f.write(f"variable {self.NONCE_VAR}\n")
+        f.write("  var-kind variable\n")
+        f.write("  dec-type int\n")
+        f.write("  rep-type int\n")
+        f.write("  comparability 22\n")
         for name in self.VAR_NAMES:
             f.write(f"variable {name}\n")
             f.write("  var-kind variable\n")
@@ -114,17 +165,20 @@ class DaikonTraceWriter:
             for sample in self.data_samples:
                 kind = sample[0]
                 func_name = sample[1]
-                regs = sample[2]
+                nonce = sample[2]
+                regs = sample[3]
 
                 if kind == "enter":
                     f.write(f"{func_name}:::ENTER\n")
+                    f.write(f"{self.NONCE_VAR}\n{nonce}\n1\n")
                     for name, val in zip(self.VAR_NAMES, regs):
                         f.write(f"{name}\n{val}\n1\n")
                     f.write("\n")
 
                 elif kind == "exit":
-                    entry_regs = sample[3]
+                    entry_regs = sample[4]
                     f.write(f"{func_name}:::EXIT0\n")
+                    f.write(f"{self.NONCE_VAR}\n{nonce}\n1\n")
                     for name, val in zip(self.VAR_NAMES, regs):
                         f.write(f"{name}\n{val}\n1\n")
                     # orig() values let Daikon infer what changed across the call
@@ -375,20 +429,50 @@ def dump_regs(uc):
 def log_event(obj):
     trace_f.write(json.dumps(obj) + "\n")
 
-def read_regs(uc):
-    """Read all tracked registers and return as an ordered list."""
-    return [
+def read_regs(uc, stack_arg_offset):
+    """Read eax/ebx/ecx/edx plus NUM_STACK_ARG_SLOTS stack-argument words,
+    ordered to match VAR_NAMES.
+
+    stack_arg_offset is where arg1 sits relative to the CURRENT esp:
+      - 4 when esp already has the return address on top of it (we jumped
+          straight to a function/stub's entry, or we're at its `ret`)
+      - 0 when hooked at the CALL instruction itself, before it pushes
+          the return address
+    """
+    esp = uc.reg_read(UC_X86_REG_ESP)
+    values = [
         uc.reg_read(UC_X86_REG_EAX),
         uc.reg_read(UC_X86_REG_EBX),
         uc.reg_read(UC_X86_REG_ECX),
         uc.reg_read(UC_X86_REG_EDX),
-        uc.reg_read(UC_X86_REG_ESP),
-        uc.reg_read(UC_X86_REG_EBP),
     ]
+    for i in range(NUM_STACK_ARG_SLOTS):
+        try:
+            values.append(upck32(bytes(uc.mem_read(esp + stack_arg_offset + i * 4, 4))))
+        except UcError:
+            values.append(0)
+    return values
 
-# Tracks in-flight calls: ret_addr -> (func_name, entry_regs)
-# Used by both the native CALL branch and the import branch.
+# Tracks in-flight calls: ret_addr -> LIST of frames (func_name, nonce, entry_regs).
+# A list (not a single tuple) because the SAME return address can be
+# pushed more than once before any of those calls return -- e.g. a
+# recursive function whose call site is hit again before the first
+# call unwinds. Using a list per ret_addr makes this a real stack:
+# push on CALL, pop on RET, so nested/recursive calls to that same
+# call site resolve LIFO instead of one overwriting another.
 native_call_stack = {}
+
+def _push_call(ret_addr, func_name, nonce, entry_regs):
+    native_call_stack.setdefault(ret_addr, []).append((func_name, nonce, entry_regs))
+
+def _pop_call(ret_addr):
+    frames = native_call_stack.get(ret_addr)
+    if not frames:
+        return None
+    frame = frames.pop()
+    if not frames:
+        del native_call_stack[ret_addr]
+    return frame
 
 def hook_code(uc, address, size, user_data):
     global insn_count
@@ -405,7 +489,6 @@ def hook_code(uc, address, size, user_data):
         break
 
     mnemonic = insn["mnemonic"] if insn else ""
-    regs = read_regs(uc)
 
     # ------------------------------------------------------------------
     # IMPORT CALL: entering a known DLL stub
@@ -413,6 +496,7 @@ def hook_code(uc, address, size, user_data):
     if address in import_map:
         info = import_map[address]
         func_name = f"{info['dll']}::{info['name']}"
+        nonce = dtrace.next_nonce()
 
         # JSON
         log_event({
@@ -421,11 +505,16 @@ def hook_code(uc, address, size, user_data):
             "dll": info["dll"],
             "name": info["name"],
             "iat_va": info["iat_va"],
+            "nonce": nonce,
             "regs_before": dump_regs(uc),
         })
 
+        # We jumped straight here, so the return address is already on
+        # top of the stack - args start right above it.
+        regs = read_regs(uc, 4)
+
         # Dtrace ENTER
-        dtrace.add_enter(func_name, regs)
+        dtrace.add_enter(func_name, nonce, regs)
 
         # Grab the return address from the stack so we can emit a matching
         # EXIT when execution returns from the stub.
@@ -436,7 +525,7 @@ def hook_code(uc, address, size, user_data):
             ret_addr = None
 
         if ret_addr:
-            native_call_stack[ret_addr] = (func_name, regs)
+            _push_call(ret_addr, func_name, nonce, regs)
 
     # ------------------------------------------------------------------
     # NATIVE CALL: CALL instruction inside our own code
@@ -445,6 +534,7 @@ def hook_code(uc, address, size, user_data):
         # The return address will be address+size (pushed onto stack by CALL).
         ret_addr = address + size
         func_name = f"sub_0x{address:x}"
+        nonce = dtrace.next_nonce()
 
         # JSON
         log_event({
@@ -453,12 +543,17 @@ def hook_code(uc, address, size, user_data):
             "size": size,
             "disasm": f"{mnemonic} {insn['op_str']}",
             "bytes": insn["bytes"],
+            "nonce": nonce,
             "regs": dump_regs(uc),
         })
 
+        # Hooked at the CALL instruction itself, before it executes: the
+        # return address isn't pushed yet, so esp already points at arg1.
+        regs = read_regs(uc, 0)
+
         # Dtrace ENTER
-        dtrace.add_enter(func_name, regs)
-        native_call_stack[ret_addr] = (func_name, regs)
+        dtrace.add_enter(func_name, nonce, regs)
+        _push_call(ret_addr, func_name, nonce, regs)
 
     # ------------------------------------------------------------------
     # RETURN: close the most recent matching ENTER in dtrace
@@ -481,16 +576,22 @@ def hook_code(uc, address, size, user_data):
         except UcError:
             ret_addr = None
 
-        if ret_addr and ret_addr in native_call_stack:
-            func_name, entry_regs = native_call_stack.pop(ret_addr)
-            # Dtrace EXIT — pass current regs; add_exit records orig() values
-            # from entry_regs automatically.
-            dtrace.add_exit(func_name, regs)
+        if ret_addr is not None:
+            frame = _pop_call(ret_addr)
+            if frame is not None:
+                func_name, nonce, entry_regs = frame
+                # esp already holds the return address at a `ret`, same as
+                # the import-stub entry case.
+                regs = read_regs(uc, 4)
+                # Dtrace EXIT for the SAME nonce as the matching ENTER --
+                # this is what makes recursive calls to func_name resolve
+                # correctly instead of colliding on a func_name-keyed dict.
+                dtrace.add_exit(func_name, nonce, regs, entry_regs)
         # Unmatched RETs (e.g. runtime teardown) are logged to JSON but
-        # silently ignored by dtrace — Daikon will drop any leftover ENTERs.
+        # silently ignored by dtrace -- Daikon will drop any leftover ENTERs.
 
     # ------------------------------------------------------------------
-    # EVERYTHING ELSE: regular instruction — JSON only, no dtrace
+    # EVERYTHING ELSE: regular instruction â€” JSON only, no dtrace
     # ------------------------------------------------------------------
     else:
         log_event({

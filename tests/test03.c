@@ -1,13 +1,17 @@
 #include <stdio.h>
 
+int sum(int num) {
+    
+    return num + 1;
+}
+
 int main() {
-    int i;
-    int sum = 0;
+    int total = 0;
     
-    for (i = 0; i < 5; i++) {
-        sum += i;
+    for (int i = 0; i < 5; i++) {
+        total = sum(total);
     }
-    
-    printf("Sum: %d\n", sum);
+
+    printf("Sum: %d\n", total);
     return 0;
 }

@@ -1,0 +1,485 @@
+decl-version 2.0
+var-comparability none
+
+ppt ..main():::ENTER
+ppt-type enter
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..stack_read():::ENTER
+ppt-type enter
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable arg0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..stack_read():::EXIT0
+ppt-type subexit
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable arg0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..heap_read():::ENTER
+ppt-type enter
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable arg0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..heap_read():::EXIT0
+ppt-type subexit
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+variable arg0
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+ppt ..main():::EXIT0
+ppt-type subexit
+variable rax
+  var-kind variable
+  dec-type int
+  rep-type int
+  comparability 22
+
+..main():::ENTER
+this_invocation_nonce
+0
+rax
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+1
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+1
+rax
+1
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+2
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+2
+rax
+0
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+3
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+3
+rax
+3
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+4
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+4
+rax
+2
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+5
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+5
+rax
+5
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+6
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+6
+rax
+4
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+7
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+7
+rax
+7
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+8
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+8
+rax
+6
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+9
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+9
+rax
+9
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+10
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+10
+rax
+8
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+11
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+11
+rax
+11
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+12
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+12
+rax
+10
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+13
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+13
+rax
+13
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+14
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+14
+rax
+12
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+15
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+15
+rax
+15
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+16
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+16
+rax
+14
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+17
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+17
+rax
+17
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+18
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+18
+rax
+16
+1
+arg0
+0
+1
+
+..stack_read():::ENTER
+this_invocation_nonce
+19
+rax
+140733194432472
+1
+arg0
+140733194432472
+1
+
+..stack_read():::EXIT0
+this_invocation_nonce
+19
+rax
+19
+1
+arg0
+140733194432472
+1
+
+..heap_read():::ENTER
+this_invocation_nonce
+20
+rax
+0
+1
+arg0
+0
+1
+
+..heap_read():::EXIT0
+this_invocation_nonce
+20
+rax
+18
+1
+arg0
+0
+1
+
+..main():::EXIT0
+this_invocation_nonce
+0
+rax
+0
+1
+
