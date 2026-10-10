@@ -22,6 +22,7 @@ is the research output.
 | [phase10.md](phase10.md) | — | Globals as deref roots; struct globals | **B landed (opt-in), C measured harmful**; A/D/E not started |
 | [../VERIFICATION.md](../VERIFICATION.md) | — | What can be formally verified, and what cannot | **reviewed** — 1 defect found |
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
+| [../AI-TYPE-RECOVERY.md](../AI-TYPE-RECOVERY.md) | — | AI type recovery for globals: blind pilot | **piloted**: structs 0/8 → 6/8, but every hit was a mechanical signal |
 
 Tier 4 was skipped after measurement, and re-measured after tier 5 landed: the
 range-based classifier in `memmap.py` now gets **7 of 7** pointers right
