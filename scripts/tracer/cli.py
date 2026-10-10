@@ -55,8 +55,36 @@ def build_parser():
     out = p.add_argument_group("output")
     out.add_argument("-o", "--output", default="trace.dtrace",
                      help="Daikon trace output path (default: trace.dtrace)")
+    out.add_argument("--gzip", action="store_true",
+                     help="Compress the trace, appending .gz to --output if it "
+                          "is not already there. Daikon reads .dtrace.gz "
+                          "natively. The output is highly repetitive - on bc, "
+                          "131.5 MB becomes 1.09 MB - and nothing is lost.")
     out.add_argument("--json-output", default=None,
                      help="Optional JSON trace output for debugging.")
+    out.add_argument("--dump-inferences", default=None, metavar="PATH",
+                     help="Write every conclusion the tracer reached to PATH as "
+                          "JSON: per-function arity, widths, pointer verdicts and "
+                          "return decisions, global shapes, and each skipped "
+                          "call with the real target of indirect ones. For "
+                          "auditing the heuristics against debug info "
+                          "(scripts/audit_heuristics.py); the trace itself is "
+                          "unchanged.")
+
+    inp = p.add_argument_group("program input")
+    inp.add_argument("--argv", default=None,
+                     help="Arguments for the traced program, as one "
+                          "whitespace-separated string: --argv '958 1 1 2597'. "
+                          "Without this, argc is 1 and argv[1..] is empty, "
+                          "which is why a program that validates its arguments "
+                          "prints a usage message and exits.")
+    inp.add_argument("--argv-file", default=None,
+                     help="One argv vector per line; the program is run once "
+                          "per line and all samples merge into one trace. "
+                          "Needed to reproduce an oracle built from many runs "
+                          "- Daikon's own tcas goal file comes from 501 - and "
+                          "it is the interface a fuzzer drives. Blank lines "
+                          "and lines starting with # are skipped.")
 
     func = p.add_argument_group("function selection")
     func.add_argument("--start-func", default="main",
@@ -130,6 +158,12 @@ def build_parser():
                       help="Tier 3+: omit `return` for functions whose callers "
                            "never read rax afterwards. Behind a flag so its "
                            "effect on the scores is separately measurable.")
+    heur.add_argument("--ignore-globals", action="store_true",
+                      help="Declare no global variables, even at tier 8 and "
+                           "above, like Kvasir's --ignore-globals (which "
+                           "Daikon's own bc run uses). Also avoids the per-"
+                           "sample snapshot of the data sections, whose cost "
+                           "grows with samples times data size.")
 
     heur.add_argument("--heap-base", type=lambda x: int(x, 0), default=0x20000000,
                       help="Base of the tier-5 emulated heap (default: 0x20000000). "
@@ -219,6 +253,9 @@ def main(argv=None):
     if not os.path.isfile(args.binary):
         print(f"[!] Binary not found: {args.binary}", file=sys.stderr)
         return 1
+
+    if args.gzip and not args.output.endswith(".gz"):
+        args.output += ".gz"
 
     log = Logger(quiet=args.quiet, verbose=args.verbose)
     tracer = Tracer(args, log)

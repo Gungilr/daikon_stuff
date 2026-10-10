@@ -86,3 +86,34 @@ def test_help_renders_the_usage_epilog(capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "--layouts 5" in out, "usage epilog (module docstring) missing from --help"
+
+
+# ---- program input (phase 12) ----------------------------------------------
+
+def test_argv_and_argv_file_parse():
+    a = build_parser().parse_args(["b.exe", "--argv", "958 1 1 2597"])
+    assert a.argv == "958 1 1 2597"
+    b = build_parser().parse_args(["b.exe", "--argv-file", "vectors.txt"])
+    assert b.argv_file == "vectors.txt"
+
+
+def test_no_argv_by_default():
+    """The default must stay empty: supplying argv changes rsi at main:::ENTER
+    and maps another region, which moved 15 golden files when it was done
+    unconditionally. Program input is opt-in like every other capability."""
+    a = build_parser().parse_args(["b.exe"])
+    assert a.argv is None and a.argv_file is None
+
+
+def test_dump_inferences_is_opt_in():
+    """Off by default; with a path, the tracer also writes its conclusions."""
+    p = build_parser()
+    assert p.parse_args(["b.exe"]).dump_inferences is None
+    args = p.parse_args(["b.exe", "--dump-inferences", "x.json"])
+    assert args.dump_inferences == "x.json"
+
+
+def test_ignore_globals_is_opt_in():
+    p = build_parser()
+    assert p.parse_args(["b.exe"]).ignore_globals is False
+    assert p.parse_args(["b.exe", "--ignore-globals"]).ignore_globals is True

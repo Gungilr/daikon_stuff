@@ -11,6 +11,7 @@ would fit topically, because it builds its own throwaway Uc sandbox.
 from __future__ import print_function
 
 import json
+import re
 import struct
 import sys
 
@@ -25,6 +26,7 @@ try:
         UC_HOOK_MEM_FETCH_UNMAPPED,
     )
     from capstone.x86 import X86_OP_MEM, X86_OP_REG, X86_REG_RBP
+    import unicorn.x86_const as UC_X86_CONST
     from unicorn.x86_const import (
         UC_X86_REG_RAX, UC_X86_REG_RBX, UC_X86_REG_RCX, UC_X86_REG_RDX,
         UC_X86_REG_RSI, UC_X86_REG_RDI, UC_X86_REG_RBP, UC_X86_REG_RSP,
@@ -59,6 +61,23 @@ from .writer import NONSENSICAL, DaikonTraceWriter, VarSpec, legacy_specs
 # Allocator functions the tier-5 model intercepts. printf and friends stay
 # generically skipped - modelling output has no bearing on invariants.
 ALLOCATORS = ("malloc", "calloc", "realloc", "free")
+
+# Library functions modelled in Python rather than executed, joining the same
+# PLT-interception table the allocators use. Kept minimal on purpose: measured
+# across the blocked programs in Daikon's suite, `tcas` needs only `atoi`, and
+# `replace` only `fgets`, so "model libc" is a far smaller job than it sounds.
+#
+# `exit` is here for correctness, not reach: an unmodelled call returns 0 and
+# execution CONTINUES, so an input that lands on an error path would run
+# through code the real program never reaches and every later sample would be
+# fiction. A mutator hits error paths constantly, which makes this load-bearing
+# for fuzzing rather than a nicety.
+LIBC_STUBS = ("atoi", "atol", "exit", "_exit", "abort")
+
+# argv lives on its own page, deliberately not on the stack: --layouts shifts
+# the stack base per run and must not land on the argument strings.
+ARGV_BASE = 0x30000000
+ARGV_SIZE = 0x4000
 
 # SysV x86-64 floating-point argument registers, in order. Parallel to
 # REG_ARG_ORDER in infer.py and numbered independently of it: in
@@ -194,6 +213,9 @@ class Tracer:
         self.arena = None
         self._layout_index = 0
         self.alloc_stubs = {}       # PLT stub address -> allocator name
+        self.libc_stubs = {}        # PLT stub address -> modelled libc name
+        self.current_argv = []      # argv for the run in progress
+        self._exited = False        # did this run call exit()?
         self.footprints = FootprintTracker()
         self.global_access = GlobalAccessMap()
         # Tier 8. Evidence about global variables accumulates here all run and
@@ -209,6 +231,11 @@ class Tracer:
         # Tier 10 / mechanism B: a global that HOLDS a pointer is a root for
         # dereference, exactly as a pointer argument is. 65 of the 85 globals
         # in the Kvasir suite are pointer-shaped and were printed as integers.
+        # func_addr -> {addresses in the data sections it read or wrote}.
+        # Kvasir cannot compute this (DWARF says a global EXISTS, not who uses
+        # it) which is why its authors switch globals off wholesale on bc. We
+        # observe every access, so we can attribute them.
+        self.global_touch = {}
         self.global_pointer = {}      # global address -> a pointer it held
         # (func, slot) -> {instruction pc: {offsets it touched}}
         self.access_pcs = {}
@@ -223,6 +250,18 @@ class Tracer:
         self.insn_count = 0
         self._layout_insn_count = 0
         self.skipped_calls = 0
+        # Observation only, for --dump-inferences: nothing below changes what
+        # the tracer emits. Every PLT stub name (not just the modelled ones),
+        # each skipped call by target, and where each skipped INDIRECT call
+        # was really going - a function pointer into the program is skipped
+        # like a library call, and this is how often that happens.
+        self.plt_names = {}         # PLT stub address -> imported name
+        self.skipped_by_target = {}  # label -> count
+        self.indirect_calls = {}    # (pc, resolved target) -> count
+        self.hit_insn_limit = False
+        # A `ret` whose return address is not the one saved at entry: the
+        # signature of a tail call or longjmp breaking ENTER/EXIT pairing.
+        self.ret_mismatches = 0
         self.json_f = None
         self.dtrace = None
         self.mu = None
@@ -276,8 +315,17 @@ class Tracer:
         if self.is_64bit:
             self.mu.reg_write(UC_X86_REG_RSP, stack_top)
             self.mu.reg_write(UC_X86_REG_RBP, stack_top)
-            self.mu.reg_write(UC_X86_REG_RDI, 1)
-            self.mu.reg_write(UC_X86_REG_RSI, stack_top - 0x100)
+            # With no --argv, reproduce the pre-phase-12 registers EXACTLY.
+            # Mapping the argv page and pointing rsi at it changes rsi at
+            # main:::ENTER and adds a region the pointer classifier can see, so
+            # doing it unconditionally moved 15 golden files. Program input is
+            # opt-in like every other capability here.
+            if self.current_argv:
+                argc, argv_ptr = self._setup_argv()
+            else:
+                argc, argv_ptr = 1, stack_top - 0x100
+            self.mu.reg_write(UC_X86_REG_RDI, argc)
+            self.mu.reg_write(UC_X86_REG_RSI, argv_ptr)
             self.mu.reg_write(UC_X86_REG_RDX, stack_top - 0x200)
         else:
             self.mu.reg_write(UC_X86_REG_ESP, stack_top)
@@ -351,6 +399,104 @@ class Tracer:
         self.memmap.add_region(base, size, "heap")
         self.log.verbose(f"  Heap arena: 0x{base:x} - 0x{base + size:x}")
 
+    def _input_vectors(self):
+        """The argv vectors to run, one list of strings each.
+
+        `[[]]` - a single run with no arguments - reproduces the pre-phase-12
+        behaviour exactly, which is what keeps every golden file valid.
+        """
+        path = getattr(self.args, "argv_file", None)
+        if path:
+            found = []
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        found.append(line.split())
+            if found:
+                return found
+            self.log.error(f"  [!] {path} held no usable vectors")
+        one = getattr(self.args, "argv", None)
+        return [one.split()] if one else [[]]
+
+    def _setup_argv(self):
+        """Lay out argv in emulated memory; return (argc, argv pointer).
+
+        Replaces a stub that set argc=1 and pointed argv at an address nobody
+        ever populated - which is why `tcas` printed its usage text and exited,
+        and why four of six large programs barely executed.
+
+        Layout is the ordinary one: NUL-terminated strings, then a
+        NULL-terminated array of pointers to them, argv[0] being the program
+        path. On its own page so --layouts relocation cannot collide with it.
+        """
+        words = [self.args.binary] + list(self.current_argv)
+        self.mu.mem_map(ARGV_BASE, ARGV_SIZE)
+
+        # Strings first, above the pointer array they will be pointed at by.
+        ptr_bytes = 8 if self.is_64bit else 4
+        strings_at = ARGV_BASE + (len(words) + 1) * ptr_bytes
+        offsets, cursor = [], strings_at
+        for w in words:
+            raw = w.encode() + bytes(1)
+            if cursor + len(raw) > ARGV_BASE + ARGV_SIZE:
+                self.log.error("  [!] argv does not fit; truncating")
+                break
+            self.mu.mem_write(cursor, raw)
+            offsets.append(cursor)
+            cursor += len(raw)
+
+        order = "little"
+        table = b"".join(p.to_bytes(ptr_bytes, order) for p in offsets)
+        table += bytes(ptr_bytes)          # the NULL that terminates argv
+        self.mu.mem_write(ARGV_BASE, table)
+
+        if self.current_argv:
+            self.log.verbose(f"  argv: argc={len(offsets)} "
+                             + " ".join(repr(w) for w in words[1:]))
+        return len(offsets), ARGV_BASE
+
+    def _read_cstring(self, uc, addr, limit=4096):
+        """A NUL-terminated string out of emulated memory, as bytes."""
+        out = bytearray()
+        for i in range(limit):
+            try:
+                b = uc.mem_read(addr + i, 1)[0]
+            except UcError:
+                break
+            if b == 0:
+                break
+            out.append(b)
+        return bytes(out)
+
+    def _handle_libc(self, uc, name, address, size):
+        """Emulate a library call in place of executing it.
+
+        Same contract as _handle_allocator: set rax, advance rip past the call,
+        return True when handled.
+        """
+        if name in ("exit", "_exit", "abort"):
+            code = uc.reg_read(UC_X86_REG_RDI) if name != "abort" else -1
+            self.log.verbose(f"  {name}({code}) - stopping this run")
+            self._exited = True
+            uc.emu_stop()
+            return True
+
+        if name in ("atoi", "atol"):
+            raw = self._read_cstring(uc, uc.reg_read(UC_X86_REG_RDI))
+            text = raw.decode("latin-1").strip()
+            m = re.match(r"[+-]?\d+", text)
+            value = int(m.group()) if m else 0
+            if name == "atoi":
+                value = sign_extend(value & 0xFFFFFFFF, 32)
+            uc.reg_write(UC_X86_REG_RAX, value & ((1 << 64) - 1))
+            uc.reg_write(UC_X86_REG_RIP, address + size)
+            self._log_event({"type": "libc", "fn": name, "pc": address,
+                             "arg": text, "result": value})
+            return True
+
+        return False
+
     def _handle_allocator(self, uc, name, address, size):
         """Emulate an allocator call in place of executing it.
 
@@ -405,8 +551,16 @@ class Tracer:
 
         Measured on Daikon's own Kvasir suite: globals are 80.5% of everything
         the oracle says, and emitting none of them capped recall at 4%.
+
+        `--ignore-globals` turns them off at any tier, as Kvasir's option of
+        the same name does - Daikon's own `bc` run uses it. Each sample keeps a
+        snapshot of the data sections until finalize, so a call-heavy program
+        with large, changing globals costs memory in proportion to samples
+        times data size: Stanford's Towers, 93 KB of .bss, took 2.5 GB over
+        150,000 instructions with globals and 55 MB without.
         """
-        return self.args.tier >= 8 and self.is_64bit
+        return (self.args.tier >= 8 and self.is_64bit
+                and not getattr(self.args, "ignore_globals", False))
 
     def _note_rip_targets(self, insn):
         """Record RIP-relative operand targets that land in a data section.
@@ -836,6 +990,130 @@ class Tracer:
             self.arity.note_caller_observation(callee_addr, False)
             self._pending_rax_watch = None
 
+    def _note_skipped_call(self, uc, insn, target, pc, next_addr):
+        """Count a skipped call for --dump-inferences. Changes nothing emitted.
+
+        A direct call is labelled by its PLT name when it has one. An indirect
+        call has no target in its encoding, so the operand is read instead -
+        that is the only way to tell a library call made through the GOT from
+        a function pointer into the program, which is skipped all the same.
+        """
+        if target is None:
+            resolved = self._resolve_call_target(uc, insn, next_addr)
+            label = "indirect"
+            if resolved is not None and resolved in self.plt_names:
+                label = f"indirect:{self.plt_names[resolved]}"
+            key = (pc, resolved)
+            self.indirect_calls[key] = self.indirect_calls.get(key, 0) + 1
+        else:
+            label = self.plt_names.get(target, f"0x{target:x}")
+        self.skipped_by_target[label] = self.skipped_by_target.get(label, 0) + 1
+
+    def _resolve_call_target(self, uc, insn, next_addr):
+        """Where an indirect `call` is really going, or None if unreadable.
+
+        Reads the operand without executing anything: `call rax` is the
+        register's value; `call [rbp-8]` or `call [rip+x]` is the pointer
+        stored at the effective address.
+        """
+        try:
+            op = insn.operands[0]
+        except (IndexError, AttributeError):
+            return None
+        try:
+            if op.type == X86_OP_REG:
+                return uc.reg_read(self._uc_reg(insn.reg_name(op.reg)))
+            if op.type == X86_OP_MEM:
+                mem = op.mem
+                ea = mem.disp
+                if mem.base:
+                    base = insn.reg_name(mem.base)
+                    ea += (next_addr if base in ("rip", "eip")
+                           else uc.reg_read(self._uc_reg(base)))
+                if mem.index:
+                    ea += uc.reg_read(
+                        self._uc_reg(insn.reg_name(mem.index))) * mem.scale
+                width = 8 if self.is_64bit else 4
+                ea &= (1 << (8 * width)) - 1
+                return int.from_bytes(bytes(uc.mem_read(ea, width)), "little")
+        except (UcError, AttributeError, TypeError):
+            return None
+        return None
+
+    @staticmethod
+    def _uc_reg(name):
+        """Unicorn's constant for a register Capstone names, e.g. 'rax'."""
+        return getattr(UC_X86_CONST, "UC_X86_REG_" + name.upper())
+
+    def _inference_report(self):
+        """Every conclusion the tracer reached, for --dump-inferences.
+
+        Built from the same state the schema is built from, after
+        _finalize(), so it reports what was emitted rather than a re-derivation
+        that could drift from it.
+        """
+        enters, exits = {}, {}
+        for (_ppt, ppt_type, func_addr, *_rest) in self.pending:
+            bucket = enters if ppt_type == "enter" else exits
+            bucket[func_addr] = bucket.get(func_addr, 0) + 1
+
+        funcs = []
+        for addr, name in sorted(self.functions.items()):
+            # Every known function is listed, run or not: one that never ran
+            # is itself evidence, e.g. the target of a skipped indirect call.
+            described = (self.arity.describe(addr)
+                         if self._arity_enabled() else None)
+            entry = {"name": name, "addr": addr,
+                     "enters": enters.get(addr, 0), "exits": exits.get(addr, 0)}
+            if described is not None:
+                entry.update(described)
+                n_reg = described["n_reg"]
+                n_args = n_reg + described["n_stack"]
+                entry["slot_kinds"] = [
+                    self._slot_type(addr, self._arg_raw_index(i, n_reg))
+                    for i in range(n_args)]
+                entry["returns_value"] = self.arity.returns_value(addr)
+                if self._tier3_enabled():
+                    entry["return_emitted"] = self._emits_return(addr)
+                    if (self._float_enabled()
+                            and self.arity.return_sse_width(addr)):
+                        entry["return_kind"] = "float"
+                    else:
+                        entry["return_kind"] = self._slot_type(addr, 0)
+            funcs.append(entry)
+
+        objects = []
+        for obj in self.global_objects:
+            objects.append({
+                "addr": obj.address, "size": obj.size, "width": obj.width,
+                "shape": ("array" if obj.is_array
+                          else "scalar" if obj.is_scalar else "struct"),
+                "fields": [list(f) for f in obj.fields]})
+
+        indirect = [{"pc": pc, "target": tgt,
+                     "is_function": (tgt in self.functions
+                                     if tgt is not None else None),
+                     "count": n}
+                    for (pc, tgt), n in sorted(
+                        self.indirect_calls.items(),
+                        key=lambda kv: (kv[0][0], kv[0][1] or 0))]
+
+        return {
+            "version": 1,
+            "binary": self.args.binary,
+            "tier": self.args.tier,
+            "detect_void": bool(getattr(self.args, "detect_void", False)),
+            "instructions": self.insn_count,
+            "hit_insn_limit": self.hit_insn_limit,
+            "ret_mismatches": self.ret_mismatches,
+            "samples": len(self.dtrace.data_samples),
+            "skipped_calls": self.skipped_calls,
+            "skipped_by_target": dict(sorted(self.skipped_by_target.items())),
+            "indirect_calls": indirect,
+            "functions": funcs,
+            "globals": objects,
+        }
+
     def _poison_on(self):
         return bool(getattr(self.args, "poison_uninitialized", False))
 
@@ -894,6 +1172,9 @@ class Tracer:
         self.global_access.note(addr, size)
         if self._globals_enabled():
             self.global_table.note_access(addr, size)
+            if self.global_table.in_data(addr) and self.call_stack:
+                self.global_touch.setdefault(
+                    self.call_stack[-1][2], set()).add(addr)
 
         frame = self.call_stack[-1]
         func_addr, arg_values = frame[2], frame[5]
@@ -1300,6 +1581,7 @@ class Tracer:
                     fmt = '<Q' if self.is_64bit else '<I'
                     actual = struct.unpack(fmt, uc.mem_read(sp, width))[0]
                     if actual != frame_ret_addr:
+                        self.ret_mismatches += 1
                         self.log.verbose(
                             f"  [!] ret mismatch in {func_name}: frame expected "
                             f"0x{frame_ret_addr:x}, stack holds 0x{actual:x}"
@@ -1364,8 +1646,16 @@ class Tracer:
                                        address, size)
                 return
 
+            if target is not None and target in self.libc_stubs:
+                if self._handle_libc(uc, self.libc_stubs[target],
+                                     address, size):
+                    return
+
             if target is None or target not in self.functions:
                 next_addr = address + size
+                # Recorded before the skip rewrites any register, so an
+                # indirect call's operand still holds its real target.
+                self._note_skipped_call(uc, insn, target, address, next_addr)
                 if self.is_64bit:
                     uc.reg_write(UC_X86_REG_RAX, 0)
                     uc.reg_write(UC_X86_REG_RIP, next_addr)
@@ -1391,6 +1681,7 @@ class Tracer:
 
         if self.args.max_insns and self._layout_insn_count >= self.args.max_insns:
             self.log.info(f"\n[!] Hit instruction limit ({self.args.max_insns})")
+            self.hit_insn_limit = True
             uc.emu_stop()
 
     # ---- Memory hooks ----
@@ -1721,6 +2012,21 @@ class Tracer:
         # at every program point - Kvasir reports every global everywhere, and
         # a schema that varied per ppt could not be compared with it. This is
         # also the only point at which all the evidence is in.
+        # Raw type evidence per global, for offline analysis of how much
+        # ambiguity survives combining the available signals. Not used by the
+        # tracer itself - the decision is logged separately as `global <...>`.
+        for addr, size in sorted(set(self.global_table._symbols)):
+            fields = self.global_table.fields_within(addr, size)
+            widths = sorted({w for _, w in fields})
+            ptr = sorted(self.global_table._ptr_slots.get(addr, ()))
+            self.log.verbose(
+                f"  globalev addr=0x{addr:x} size={size} "
+                f"fields={fields} widths={widths} ptrslots={ptr}")
+
+        for fa, hit in sorted(self.global_touch.items()):
+            self.log.verbose(f"  globaltouch func=0x{fa:x} n={len(hit)} "
+                             + " ".join(f"0x{a:x}" for a in sorted(hit)))
+
         for key, bypc in sorted(self.access_pcs.items()):
             spread = max((len(v) for v in bypc.values()), default=0)
             self.log.verbose(
@@ -1785,8 +2091,14 @@ class Tracer:
             except Exception as e:
                 stubs = {}
                 self.log.error(f"PLT resolution failed: {e}")
+            self.plt_names = dict(stubs)
             self.alloc_stubs = {a: nm for a, nm in stubs.items()
                                 if nm in ALLOCATORS}
+            self.libc_stubs = {a: nm for a, nm in stubs.items()
+                               if nm in LIBC_STUBS}
+            if self.libc_stubs:
+                self.log.info("  Library calls modelled: " + ", ".join(
+                    f"{nm}@0x{a:x}" for a, nm in sorted(self.libc_stubs.items())))
             if self.alloc_stubs:
                 pretty = ", ".join(f"{nm}@0x{a:x}"
                                    for a, nm in sorted(self.alloc_stubs.items()))
@@ -1885,14 +2197,28 @@ class Tracer:
         # behavior exactly.
         timeout_us = self.args.timeout * 1_000_000 if self.args.timeout else 0
 
-        for layout in range(self.args.layouts):
+        # One run per (input vector, stack layout). Both vary independent
+        # things, so they multiply: `--argv-file` with 501 lines and
+        # `--layouts 2` is 1002 runs. The count is logged up front because that
+        # product is easy to set by accident.
+        vectors = self._input_vectors()
+        total = len(vectors) * self.args.layouts
+        if total > 1:
+            self.log.info(f"[+] Runs: {len(vectors)} input vector(s) x "
+                          f"{self.args.layouts} layout(s) = {total}")
+
+        run = -1
+        for vec_index, vector in enumerate(vectors):
+          for layout in range(self.args.layouts):
+            run += 1
             self._layout_index = layout
+            self.current_argv = vector
+            self._exited = False
             stack_base = self.args.stack_base + layout * LAYOUT_STRIDE
-            if self.args.layouts > 1:
+            if total > 1 and (total <= 12 or run % 50 == 0):
                 self.log.info(
-                    f"\n[+] Layout {layout + 1}/{self.args.layouts}: "
-                    f"stack_base=0x{stack_base:x}"
-                )
+                    f"[+] Run {run + 1}/{total}: vector {vec_index + 1}, "
+                    f"stack_base=0x{stack_base:x}")
 
             self._setup_memory(stack_base)
             self.call_stack = []
@@ -1923,6 +2249,9 @@ class Tracer:
         self.dtrace.close()
         if self.json_f is not None:
             self.json_f.close()
+        if getattr(self.args, "dump_inferences", None):
+            with open(self.args.dump_inferences, "w") as f:
+                json.dump(self._inference_report(), f, indent=1, sort_keys=True)
 
         # 7. Summary
         self.log.info(f"\n[+] Daikon trace:    {self.args.output}")

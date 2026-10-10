@@ -1,5 +1,5 @@
 """Struct layout recovery from access footprints (pure - no Unicorn)."""
-from tracer.deref import FootprintTracker, decode_field
+from tracer.deref import MAX_VALUE_BYTES, FootprintTracker, decode_field
 
 F = 0x401000
 
@@ -142,3 +142,12 @@ def test_decode_past_the_blob_returns_none():
 
 def test_decode_of_missing_blob_returns_none():
     assert decode_field(None, 0, 4) is None
+
+
+def test_a_field_wider_than_a_machine_word_decodes_to_none():
+    """An 1800-byte object is not a scalar, and no single Daikon value can hold
+    it. `space` crashed in the writer on exactly this before the cap."""
+    blob = bytes(2000)
+    assert decode_field(blob, 0, 2000) is None
+    assert decode_field(blob, 0, MAX_VALUE_BYTES) == 0      # 8 bytes is fine
+    assert decode_field(blob, 0, MAX_VALUE_BYTES + 1) is None

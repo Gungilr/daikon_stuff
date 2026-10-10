@@ -26,5 +26,9 @@ daikon-output/
 # Compiled test binaries - rebuilt by `make`. The .c sources are tracked.
 *.exe
 
+# Heuristic-audit corpus: third-party sources fetched at a pinned commit, their
+# builds, and tracer outputs. Rebuilt by scripts/audit_corpus.py.
+audit/
+
 # NOTE: tests_py/golden/*.dtrace is deliberately NOT ignored. Those are the
 # byte-identity baselines every tier is measured against.

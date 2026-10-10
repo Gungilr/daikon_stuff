@@ -209,3 +209,21 @@ def test_a_64_bit_value_stays_inside_the_declared_type():
     assert sign_extend(1 << 63, 64) == -(1 << 63)
     assert sign_extend(42, 64) == 42          # small values untouched
     assert sign_extend(0x7fff00000000, 64) == 0x7fff00000000   # a stack pointer
+
+
+# ---- describe(), the source of --dump-inferences ----------------------------
+
+def test_describe_agrees_with_the_accessors():
+    """The audit grades exactly these numbers, so they must be the ones the
+    schema uses rather than a second derivation that could drift."""
+    t = run(("mov", ["edi"], []), ("mov", ["rsi"], []), ("mov", [], ["eax"]))
+    d = t.describe(F)
+    assert (d["n_reg"], d["n_stack"]) == t.arity(F) == (2, 0)
+    assert d["arg_width"] == {"0": 32, "1": 64}
+    assert d["ret_width"] == t.return_width(F) == 32
+    assert d["sse_arity"] == t.sse_arity(F) == 0
+    assert d["ret_sse_width"] is None
+
+
+def test_describe_of_an_unseen_function_is_none():
+    assert ArityTracker().describe(0xdead) is None

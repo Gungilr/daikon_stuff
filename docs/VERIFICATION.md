@@ -40,6 +40,13 @@ verify, and it needs the statements we *can* verify to be true.
 
 ## 2. Classification of every technique in use
 
+*Added 2026-10-03.* The tables below cover 21 techniques. The complete list of
+42 inference rules, each with strengths, flaws and a soundness verdict, is
+[HEURISTICS.md](HEURISTICS.md). Building it found three rules that give wrong
+answers on ordinary programs: a float return is declared whenever SSE code
+writes `xmm0` (H16); calls through function pointers are skipped (H38); and by
+default, memory the program never wrote is reported as zero (H19).
+
 ### Tier A — sound by construction
 
 These read a specified structure or apply a defined semantics. Nothing is
@@ -65,7 +72,7 @@ compiler or ABI convention rather than a law.
 | use-before-def ⇒ caller-supplied | argument registers are caller-saved | reading an uninitialised caller-saved register looks identical |
 | arity = highest index + 1 | SysV assigns argument registers in order, no gaps | hand-written asm, non-SysV ABIs |
 | spill-slot read at EXIT | the -O0 prologue stores each parameter to a fixed frame offset | -O1+ keeps parameters in registers; no slot exists |
-| SSE argument numbering | float args occupy xmm0-7, numbered independently | correct, but the interleaving with integer args is genuinely lost |
+| SSE argument numbering | float args occupy xmm0-7, numbered independently | correct; the interleaving with integer args is not in the register assignment, though the -O0 prologue's first reads follow declaration order on the one signature measured ([RELATED-WORK.md §1e](RELATED-WORK.md#1e-at--o0-argument-registers-are-first-read-in-declaration-order)) |
 | signedness from a consuming opcode | the compiler emits `shr` for unsigned, `sar` for signed | sound *given the compiler is type-correct* — a strong premise |
 | stack-argument slots at `[rbp+0x10+8k]` | standard frame layout | `-fomit-frame-pointer` |
 
@@ -153,6 +160,11 @@ value** against Kvasir's dtrace for the variables both tools name. We compare
 *invariants* today; comparing *samples* would test the tracer directly instead
 of through Daikon.
 
+It has a known first target. Unmodelled library calls are skipped, and
+`memcpy`, `memset`, `strdup`, `strlen` or `toupper` is called in nine of the 29
+programs, so their values can differ while their counts agree
+([RELATED-WORK.md §1f](RELATED-WORK.md#1f-skipped-library-calls-change-program-state-in-9-of-29-programs)).
+
 ### Determinism and regression
 
 Byte-identical output across runs is the phase-0 gate and still holds; golden
@@ -212,8 +224,10 @@ Rebuilding at -O1/-O2 turns six assumptions into six measurements.
 - **Names.** Destroyed by stripping. The scorer supplies them from DWARF
   precisely because the tracer never can, and that is the one place DWARF is
   allowed to enter.
-- **Completeness.** A dynamic analysis sees executed paths. `pick_first`'s dead
-  parameter is invisible by construction, and no technique changes that.
+- **Completeness.** A dynamic analysis sees executed paths only. `pick_first`'s
+  dead parameter is recovered at -O0, because the prologue spills it
+  (`test_dead_parameters_recovered_at_O0`). At -O1 and above the callee never
+  reads it, and only a call-site analysis, which is not built, could recover it.
 - **That an invariant generalises.** Tier D. Structural.
 - **Two same-width types the program never distinguishes.** A `double` never
   loaded as a double is a `long`; an `unsigned` never shifted or compared is an

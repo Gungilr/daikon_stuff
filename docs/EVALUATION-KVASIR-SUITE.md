@@ -34,6 +34,17 @@ both:    daikon.Daikon with default settings
 scoring: scripts/score_invariants.py, unchanged
 ```
 
+*Oracle configuration, noted 2026-10-03.* Kvasir ran with its defaults: DynComp
+on, globals on, default traversal depths. That is not the configuration the
+suite's authors use. Their Makefiles pass per-program options to 20 programs,
+eight of these 29 (CoercePointerTest, NestedStructTest, NestedStructVarList,
+SelectGlobalsTest, SimpleDisambigStructTest, crazy-test-1, local-ptr, md5), such
+as `--disambig`, `--var-list-file` and `--nesting-depth=3`. They also turn
+DynComp off for every program (Makefile.common). So the oracle here is default
+Kvasir: a consistent choice, since the tracer has no per-program knowledge, but
+not the suite's intended view of those eight programs. The scaling table near
+the end is the exception, and used the Makefile invocations.
+
 The suite's own `.invs.goal` files were **not** used as the oracle. They were
 produced with `daikon.derive.Derivation.disable_derived_variables=0`, which
 turns on extra derivations; scoring against them while running plain Daikon on
@@ -118,6 +129,12 @@ program points compared : 198
 Every function is entered the same number of times under Unicorn as under
 Valgrind on real hardware, including a 1000-iteration loop. **We are watching
 the same execution.** Whatever is lost is lost in description, not observation.
+
+*Qualified 2026-10-03.* Equal counts are not equal values. An unmodelled
+library call is skipped, and nine of these programs call `memcpy`, `memset`,
+`strdup`, `strlen` or `toupper`, so where such a call would have changed memory
+the samples differ ([RELATED-WORK.md
+§1f](RELATED-WORK.md#1f-skipped-library-calls-change-program-state-in-9-of-29-programs)).
 
 **Program point names align.** Checked before anything else; `..makepoint():::ENTER`
 on both sides.
@@ -392,7 +409,8 @@ vocabulary is small.** It sees every byte Kvasir sees, at every call Kvasir
 sees, and can describe roughly a twentieth of what Kvasir can describe, because
 the other nineteen twentieths are statements about *types* — which global this
 address is, that six words are an array and not a struct, that these 252 bytes
-are one parameter and not eighteen.
+are one parameter and not eighteen. (Except where a skipped library call would
+have changed memory; see the qualification under "The emulation is exact".)
 
 That is the research question restated as a measurement. Stripping does not
 destroy the data; it destroys the vocabulary for talking about it.
@@ -487,6 +505,12 @@ and SSE arguments independently and the machine code does not record how they
 interleaved, so `f(double a, int b)` recovers both values and assigns them to
 each other's names.
 
+*Revised 2026-10-03.* At -O0 the machine code does record the order: the
+prologue first reads argument registers in declaration order, on the one mixed
+signature in this suite. And the scorer could align by each parameter's ABI
+class regardless of order. Either is predicted to turn this trade into a gain;
+not yet measured ([RELATED-WORK.md §3.4](RELATED-WORK.md#34-calling-conventions)).
+
 My own corpus is unchanged at 65/92/76 at both tier 7 and tier 8, as it must be:
 those ten fixtures contain no globals, which is how this gap stayed invisible
 for eight phases.
@@ -519,6 +543,11 @@ Makefiles:
 | wordplay | 1136 | 2s | 1.4 MB | 14 | 464 | 1240 | 20s | 5530 |
 | bc | 10348 | 5s | 865 KB | 260 | 4221 | 5392 | 36s | 3045 |
 | space | 9126 | ~1s | 1.3 MB | 272 | **21134** | 1074 | 45s | **16741** |
+
+*Noted 2026-10-03:* because these runs used the Makefile invocations, `bc` ran
+with `--ignore-globals`. Its 4,221 declared variables and 36s describe a run
+with no globals, so they are not a baseline for our runs, which declare every
+global.
 
 **It handles them.** A 10k-line program traces in five seconds and Daikon
 finishes in well under a minute. Valgrind's overhead is not the problem at this
@@ -576,3 +605,41 @@ phases 9 and 10 measuring:
    executes enough to produce 5261 samples; our emulator currently handles
    corpora of ~650 instructions. Nothing here says the tracer would survive
    these programs, and that is now the obvious next measurement.
+
+
+---
+
+## tcas, driven properly (2026-09-24)
+
+The 29 programs above are the ones that need no input. Phase 12 added argv, an
+`atoi` model and multi-run support, which made the first of the *input-driven*
+programs measurable.
+
+`tcas` - a Siemens benchmark, 173 lines, twelve integer arguments - run with the
+suite's own 501 input vectors and scored against Kvasir over the same 501:
+
+| | precision | recall | F1 |
+|---|---|---|---|
+| **tcas** | **94%** | **90%** | **92%** |
+| ten fixtures written alongside the tool | 65% | 92% | 76% |
+| the 29 no-input programs | 24% | 17% | 20% |
+
+**The best result the project has produced, and on a program nobody here
+wrote.** It fits the pattern established earlier rather than contradicting it:
+`tcas` is flat - integer globals, integer parameters, no structs, no pointers to
+follow - and flat data is exactly where a black-box tracer was measured to do
+well. What it adds is that with *enough samples* (501 runs) the agreement on
+flat data is near-total, not merely good.
+
+Two things worth recording alongside it:
+
+**We are 30x faster than Kvasir at multi-run.** 501 runs in 11 seconds against
+329. Kvasir pays Valgrind startup 501 times; we re-enter one emulator. For a
+fuzzing loop this matters more than any single-run figure.
+
+**The 90% is a floor.** `initialize()` alone scores 11% while every other
+program point is 91-97%, because both tools state "all globals are zero on
+entry" but anchor the equality class on different members - producing disjoint
+fact sets that mean the same thing. 80 of the 251 missed facts are pure variable
+equalities. See [plans/phase12.md](plans/phase12.md); it is the ninth scorer
+limitation found, and like the eight before it, it understates the tracer.

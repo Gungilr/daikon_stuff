@@ -20,8 +20,13 @@ is the research output.
 | [../EVALUATION-KVASIR-SUITE.md](../EVALUATION-KVASIR-SUITE.md) | — | Same tool on Daikon's own test suite | **13/4/6** — globals are 80% of it |
 | [phase9.md](phase9.md) | 8, 9 | Global variables; floating point | **complete** — suite F1 6% → **19%** |
 | [phase10.md](phase10.md) | — | Globals as deref roots; struct globals | **B landed (opt-in), C measured harmful**; A/D/E not started |
+| [phase11.md](phase11.md) | — | Surviving a real program: value cap, gzip | **A + gzip done**; variable-count half open |
+| [phase12.md](phase12.md) | — | Program input: argv, `atoi`, many runs | **complete** — tcas **94/90/92**, 30x faster than Kvasir |
+| [phase13.md](phase13.md) | — | Type recovery as constraint solving | **planned, revised 2026-10-03** — 4 forced wrong, with 3 causes rather than 1 |
 | [../VERIFICATION.md](../VERIFICATION.md) | — | What can be formally verified, and what cannot | **reviewed** — 1 defect found |
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
+| [../RELATED-WORK.md](../RELATED-WORK.md) | — | Prior research on each open problem, and the methods it suggests | **reviewed** — 8 rediscoveries found; methods and order proposed |
+| [../HEURISTICS.md](../HEURISTICS.md) | — | Every inference rule, with strengths, flaws and a soundness verdict | **reviewed** — 42 rules, 6 unsound, order of work |
 
 Tier 4 was skipped after measurement, and re-measured after tier 5 landed: the
 range-based classifier in `memmap.py` now gets **7 of 7** pointers right
@@ -35,11 +40,13 @@ exercise them. Current standing
 against the oracle: **precision 65%, recall 92%, F1 76%**, with eight of ten
 binaries at 100% recall.
 
-Remaining work is the fuzzing-loop infrastructure (no input mechanism exists
-yet; ~11s per iteration is dominated by Python and JVM startup rather than the
-~650 instructions of actual emulation), and two measurement-driven items:
-bounding a stack pointee so `--infer-from-caller` can be safe enough to default
-on, and real modbits, which is where the remaining precision headroom is.
+Remaining work is catalogued rule by rule, with an order of work, in
+[../HEURISTICS.md](../HEURISTICS.md), and mapped to prior research in
+[../RELATED-WORK.md](../RELATED-WORK.md). *Updated 2026-10-03:* this paragraph
+used to say no input mechanism exists, which phase 12 fixed, and to name real
+modbits as the precision lever, which phase 11 retired after finding Daikon
+recomputes every modbit itself. Current standing on the other two corpora:
+24/17/20 on Daikon's suite and 94/90/92 on tcas.
 
 ## Invariants of the whole effort
 

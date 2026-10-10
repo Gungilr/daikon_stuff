@@ -182,3 +182,76 @@ def test_duplicate_declarations_are_rejected():
     w.declare("..f():::ENTER", "enter", [VarSpec("a"), VarSpec("a")])
     with pytest.raises(ValueError, match="twice"):
         w.validate()
+
+
+# ---- gzip output (phase 11) ------------------------------------------------
+
+def test_a_gz_path_is_compressed_and_still_readable(tmp_path):
+    """Daikon decides to decompress purely from the `.gz` suffix
+    (FileIO.java:1418), so the writer uses the same rule and no flag is needed
+    on either side."""
+    import gzip
+    path = tmp_path / "t.dtrace.gz"
+    w = DaikonTraceWriter(str(path))
+    w.declare("..f():::ENTER", "enter", legacy_specs(["a", "b"]))
+    w.add_sample("..f():::ENTER", [1, 2])
+    w.close()
+    assert path.read_bytes()[:2] == bytes((0x1F, 0x8B))   # gzip magic
+    text = gzip.open(path, "rt").read()
+    assert "decl-version 2.0" in text and "variable a" in text
+
+
+def test_a_plain_path_is_not_compressed(tmp_path):
+    path = tmp_path / "t.dtrace"
+    w = DaikonTraceWriter(str(path))
+    w.declare("..f():::ENTER", "enter", legacy_specs(["a"]))
+    w.add_sample("..f():::ENTER", [1])
+    w.close()
+    assert path.read_text().startswith("decl-version 2.0")
+
+
+def test_compression_does_not_change_the_content(tmp_path):
+    """The gzip path must be the same bytes, only deflated."""
+    import gzip
+    specs = legacy_specs(["a", "b"])
+    plain, gz = tmp_path / "p.dtrace", tmp_path / "g.dtrace.gz"
+    for path in (plain, gz):
+        w = DaikonTraceWriter(str(path))
+        w.declare("..f():::ENTER", "enter", specs)
+        w.add_sample("..f():::ENTER", [7, 8])
+        w.close()
+    assert plain.read_text() == gzip.open(gz, "rt").read()
+
+
+# ---- the value cap (phase 11) ----------------------------------------------
+
+def test_a_value_too_wide_for_the_declared_type_is_nonsensical(tmp_path):
+    """Daikon's `int` rep-type is a signed 64-bit long.
+
+    `space` had a 2000-byte global with no recovered shape; read whole it became
+    an integer of ~5000 digits and the run died in the writer AFTER a complete
+    and correct emulation. Out of range is `nonsensical` - that is what the
+    marker is for - rather than a number the consumer has to wrap.
+    """
+    path = tmp_path / "t.dtrace"
+    w = DaikonTraceWriter(str(path))
+    w.declare("..f():::ENTER", "enter", legacy_specs(["huge", "ok"]))
+    w.add_sample("..f():::ENTER", [1 << 900, 42])
+    w.close()
+    text = path.read_text()
+    assert "nonsensical" in text
+    assert "42" in text
+    assert "1" * 20 not in text        # no giant literal anywhere
+
+
+def test_int64_boundaries_are_kept():
+    from tracer.writer import format_value
+    assert format_value((1 << 63) - 1) == str((1 << 63) - 1)
+    assert format_value(-(1 << 63)) == str(-(1 << 63))
+    assert format_value(1 << 63) == "nonsensical"
+    assert format_value(-(1 << 63) - 1) == "nonsensical"
+
+
+def test_an_oversized_element_inside_a_sequence_is_also_caught():
+    from tracer.writer import format_value
+    assert format_value([1, 1 << 900, 3]) == "[ 1 nonsensical 3 ]"

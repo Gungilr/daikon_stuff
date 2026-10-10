@@ -384,6 +384,35 @@ class ArityTracker:
         if consumed:
             st.caller_reads_rax = True
 
+    def describe(self, func_addr):
+        """Every conclusion about one function, for --dump-inferences.
+
+        Read-only, and None for a function no instruction was attributed to.
+        Keys are strings throughout so the result serialises as JSON unchanged.
+        """
+        st = self._funcs.get(func_addr)
+        if st is None:
+            return None
+        n_reg, n_stack = self.arity(func_addr)
+        return {
+            "n_reg": n_reg,
+            "n_stack": n_stack,
+            "max_reg_index": st.max_reg_index,
+            "max_stack_slot": st.max_stack_slot,
+            "arg_width": {str(k): v for k, v in sorted(st.arg_width.items())},
+            "sse_arity": st.max_sse_index + 1,
+            "sse_width": {str(k): v for k, v in sorted(st.sse_width.items())},
+            "ret_width": st.ret_width,
+            "ret_seen": st.ret_seen,
+            "ret_unsigned": st.ret_unsigned,
+            "ret_sse_width": st.ret_sse_width,
+            "caller_checks": st.caller_checks,
+            "caller_reads_rax": st.caller_reads_rax,
+            "spilled": sorted(st.spill),
+            "sse_spilled": sorted(st.sse_spill),
+            "insn_count": st.insn_count,
+        }
+
     def returns_value(self, func_addr):
         """Void only when call sites WERE observed and none consumed rax.
 

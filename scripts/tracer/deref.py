@@ -153,16 +153,27 @@ def is_poison(chunk):
     return bool(chunk) and all(b == POISON_BYTE for b in chunk)
 
 
+# The widest value that is a single number. Daikon's `int` rep-type is a signed
+# 64-bit long, so nothing wider can be reported as one value - and an object
+# wider than a machine word is not a scalar anyway. Before this cap, `space`
+# had a 2000-byte global with no recovered shape, read whole with
+# int.from_bytes, and the run died in the WRITER after a complete and correct
+# emulation: "Exceeds the limit (4300 digits) for integer string conversion".
+MAX_VALUE_BYTES = 8
+
+
 def decode_field(blob, offset, width, signed=True, poisoned=False):
     """Decode one field out of captured pointee bytes.
 
-    None when the bytes are absent, truncated, or - with poisoning on - still
-    hold the fill pattern, meaning the program never wrote them. Valgrind
-    reports `nonsensical` for exactly that case; without the check the tracer
-    invents a value, which is the one way its output can be untrue rather than
-    merely incomplete.
+    None when the bytes are absent, truncated, wider than one machine word, or
+    - with poisoning on - still hold the fill pattern, meaning the program
+    never wrote them. Valgrind reports `nonsensical` for exactly that case;
+    without the check the tracer invents a value, which is the one way its
+    output can be untrue rather than merely incomplete.
     """
     if blob is None or offset + width > len(blob):
+        return None
+    if width > MAX_VALUE_BYTES:
         return None
     chunk = blob[offset:offset + width]
     if poisoned and is_poison(chunk):

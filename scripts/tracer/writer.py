@@ -23,6 +23,7 @@ Two format rules, both verified against Kvasir's output rather than inferred:
     Daikon still reports orig() invariants.
 """
 
+import gzip
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
@@ -45,7 +46,21 @@ def format_value(value):
     `p[].a elements < return` rather than `return == p->a + p->b`.
     """
     if isinstance(value, (list, tuple)):
-        return "[ " + " ".join(str(v) for v in value) + " ]"
+        return "[ " + " ".join(_scalar(v) for v in value) + " ]"
+    return _scalar(value)
+
+
+# Daikon's `int` rep-type is a signed 64-bit long. A value outside that range
+# is not representable, and rendering it anyway relies on the consumer to wrap
+# it - which Daikon does, silently, so it went unnoticed until the soundness
+# audit compared our output against our own samples. Anything out of range is
+# `nonsensical`, which is what that marker is for.
+_INT64_MIN, _INT64_MAX = -(1 << 63), (1 << 63) - 1
+
+
+def _scalar(value):
+    if isinstance(value, int) and not (_INT64_MIN <= value <= _INT64_MAX):
+        return NONSENSICAL
     return str(value)
 
 
@@ -173,8 +188,21 @@ class DaikonTraceWriter:
         f.write(f"  comparability {spec.comparability}\n")
 
     def close(self):
+        """Serialize. Compresses when the path ends in `.gz`.
+
+        The rule is deliberately the same one Daikon uses to decide whether to
+        decompress (`FileIO.java:1418`, `raw_filename.endsWith(".gz")`), so a
+        path that this writes is a path Daikon reads, with no flag on either
+        side.
+
+        Worth it because the output is extremely repetitive - measured on `bc`,
+        every one of 154,550 array-global samples was byte-identical to the one
+        before it - so 131.5 MB becomes 1.09 MB, 120x, in four seconds, with
+        not one fact lost.
+        """
         self.validate()
-        with open(self.filepath, 'w') as f:
+        opener = gzip.open if str(self.filepath).endswith(".gz") else open
+        with opener(self.filepath, 'wt') as f:
             f.write("decl-version 2.0\n")
             f.write(f"var-comparability {self.var_comparability}\n\n")
 

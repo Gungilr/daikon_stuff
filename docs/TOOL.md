@@ -1,5 +1,10 @@
 # The tracer, in depth
 
+For a flat reference - every raw signal, what each is turned into, and case-by-case
+coverage with the measurement behind each claim - see
+[OBSERVABILITY.md](OBSERVABILITY.md). This document is the narrative: why each
+technique exists and which bug produced it.
+
 What it is, how it is built, and — the part worth reading — the technique used
 to solve each problem, because most of them were not solved the way the plan
 said they would be.
@@ -644,12 +649,14 @@ Deliberate, and stated rather than hidden:
   distinguishes it from a `long[5]` without DWARF. Struct-shaped globals get
   `.offK` fields rather than member names, and a `char*` global is a pointer
   where Kvasir prints the string.
-- **The order of a mixed int/float parameter list is not recoverable.** SysV
-  numbers integer and SSE arguments independently and the machine code does not
-  record how they interleaved, so tier 9 recovers both values of
+- **The order of a mixed int/float parameter list is not recovered.** SysV
+  numbers integer and SSE arguments independently, so the register assignment
+  does not say how they interleaved, and tier 9 recovers both values of
   `f(double a, int b)` and assigns them to each other's names. Integer-first is
   a convention, not a recovery — which is why tier 9 is opt-in and costs 12
-  facts elsewhere to gain 9 on `FloatTest`.
+  facts elsewhere to gain 9 on `FloatTest`. At -O0 the prologue first reads
+  argument registers in declaration order, on the one such signature measured,
+  which would recover it ([RELATED-WORK.md §1e](RELATED-WORK.md#1e-at--o0-argument-registers-are-first-read-in-declaration-order)).
 - **Signedness is observable only through a consuming opcode** — a value never
   shifted, compared or widened keeps the signed default and a high-bit
   `unsigned` reads back negative. (This entry previously said signedness was
@@ -686,7 +693,18 @@ Deliberate, and stated rather than hidden:
 - **32-bit is gated off** above tier 1 and has never been executed.
 
 Open work is tracked in [plans/review-2026-09-17.md](plans/review-2026-09-17.md):
-no program-input mechanism, ~11s per iteration, modbits hardcoded to 1,
-indirect calls named by call site. (The P/R/F1 scorer listed there is now
-built — `scripts/score_invariants.py`, with results in
-[EVALUATION.md](EVALUATION.md).)
+no program-input mechanism, ~11s per iteration, indirect calls named by call
+site. (The P/R/F1 scorer listed there is now built —
+`scripts/score_invariants.py`, with results in [EVALUATION.md](EVALUATION.md).
+"Modbits hardcoded to 1" was also on that list and is **retired**: Daikon
+recomputes every modbit from the previous printed value, `FileIO.java:2187`,
+and never reads ours.)
+
+Scaling, measured 2026-09-21 on `bc` (10k lines): the emulator is fine — 43
+seconds — and the trace gzips 120x, which Daikon reads natively. The binding
+constraint is **Daikon's own runtime**, which grows about with the square of
+the variables declared at each program point. We declare 114, 112 of them
+globals, and Daikon takes 841s. Kvasir's ~16 and 36s came from a run with
+`--ignore-globals`, passed by `bc`'s own Makefile, so they are not a fair
+baseline (corrected 2026-10-03; see [HEURISTICS.md](HEURISTICS.md), H34). See
+[plans/phase11.md](plans/phase11.md).

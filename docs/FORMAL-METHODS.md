@@ -39,6 +39,20 @@ with extent + a uniform 4-byte access width:
   shape FORCED:  16 / 72       ambiguous: 56 / 72
 ```
 
+**Follow-up, 2026-09-28.** Applying every signal currently computable at once -
+extent, observed widths, access alignment, and pointer-shaped values at
+8-aligned slots - takes it to **33 of 72 forced (45%), of which 29 are
+correct**. So combining constraints does collapse the space, which is the
+argument for building this properly; but **4 are forced onto the wrong answer**,
+and a confidently wrong type is worse than an acknowledged unknown. This
+paragraph first said all four came from one cause, bulk memory copies.
+**Corrected 2026-10-03:** reading the machine code shows three. A copy's wide
+loads erase narrower stores in the evidence; the enumeration admits a struct
+only when member widths differ, which is an unsound elimination; and an array
+of structs was never a hypothesis. All three are fixable. See
+[RELATED-WORK.md §1b](RELATED-WORK.md#1b-the-four-forced-but-wrong-shapes-have-three-causes-not-one)
+and [plans/phase13.md](plans/phase13.md).
+
 **Not one global is determined by its extent.** Every shape decision the tracer
 makes is a choice among 2-5 consistent alternatives, made silently.
 
@@ -74,6 +88,12 @@ scored, and a hypothesis space you never print cannot be seen to be missing one.
 For each object, compute the set `H` of shapes consistent with all evidence.
 Then emit only the facts true under **every** `h ∈ H`.
 
+*Prior work:* this is candidate elimination over a version space (Mitchell
+1982), and TIE (NDSS 2011) reports type bounds rather than single types in the
+same spirit. It is correct only if the hypothesis language contains the truth
+and every elimination is sound, the two conditions phase 13's first enumeration
+broke. See [RELATED-WORK.md §3.1](RELATED-WORK.md#31-shape-struct-array-scalar-array-of-structs).
+
 That converts a guess into a claim that is **sound relative to the evidence**:
 not "this is an array of six ints" but "whatever this is, these facts hold."
 Where `|H| = 1` the shape is *forced* and can be asserted outright — and the
@@ -102,6 +122,11 @@ out infeasible ones.
 dynamic (under)  ⊆  true parameter set  ⊆  static (over)
 ```
 
+*Prior work:* TypeArmor (IEEE S&P 2016) brackets argument counts the same way,
+with what a callee uses as the lower bound and what a call site prepares as the
+upper. [RELATED-WORK.md §3.4](RELATED-WORK.md#34-calling-conventions) extends
+its call-site side to structs passed by value.
+
 Where the two coincide, **the arity is proved**, not guessed. Where they differ,
 the interval is a quantified bound and the difference is exactly the set of
 parameters the run failed to exercise — which is *actionable input for the
@@ -118,8 +143,9 @@ Today each heuristic decides alone: range check for pointer-ness, tiling for
 arrays, consuming opcode for signedness. They never talk, so **when two
 disagree, nothing notices.**
 
-The principled form (TIE, Retypd) generates constraints from instruction
-semantics — `mov eax,[rdi+8]` yields *rdi is a pointer* ∧ *offset 8 has width
+The principled form (TIE, Retypd; BinSub reaches similar precision 63 times
+faster, and OSPREY makes such constraints probabilistic) generates constraints
+from instruction semantics — `mov eax,[rdi+8]` yields *rdi is a pointer* ∧ *offset 8 has width
 4*; `shr` yields *unsigned*; a comparison against a known pointer yields
 *pointer* — and solves globally over a subtype lattice. Three things fall out
 that we cannot currently get:
@@ -146,6 +172,12 @@ This is the pairing from Daikon's own literature: **dynamic detection proposes,
 static verification discharges.** Daikon + ESC/Java did exactly this; the binary
 analogue is weakest-precondition over the recovered IR discharged by an SMT
 solver.
+
+*Prior work:* Houdini (FME 2001) generates candidate annotations and lets
+ESC/Java refute them until a consistent set remains; Nimmer & Ernst (FSE 2002)
+studied programmers verifying with Houdini's and Daikon's output. A per-function
+binary version, whose counterexamples become fuzzer targets, is
+[RELATED-WORK.md §3.9](RELATED-WORK.md#39-certification).
 
 Applied here, every emitted fact carries one of two labels:
 
