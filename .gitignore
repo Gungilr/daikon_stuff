@@ -28,3 +28,6 @@ daikon-output/
 
 # NOTE: tests_py/golden/*.dtrace is deliberately NOT ignored. Those are the
 # byte-identity baselines every tier is measured against.
+
+# REA type-recovery benchmark: cloned REBench, downloaded data, REA caches
+bench/
