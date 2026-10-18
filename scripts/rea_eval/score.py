@@ -54,6 +54,8 @@ def ghidra_type(s, size=None):
             pk = "char"
         elif inner["kind"] in ("abstain", "void"):
             pk = "void"
+        elif inner["kind"] == "named":  # a type Ghidra knows by name (FILE, a libc struct)
+            pk = "struct"
         else:
             pk = inner["kind"]
         return {"kind": "pointer", "size": 8, "pointee": pk}
