@@ -328,6 +328,9 @@ def main(argv):
                 return
             ok = correct(claim, true)
             c["claim_ok" if ok else "claim_wrong"] += 1
+            kind_wrong = not same_kind(claim, true)
+            c["kind_wrong"] += kind_wrong
+            c["kind_wrong_kept"] += kind_wrong and verdict != "FAIL"
             ptr_err = true["kind"] == "pointer" and claim["kind"] in ("int", "bool")
             c["ptr_as_int"] += ptr_err
             if verdict == "FAIL":
@@ -403,6 +406,8 @@ def main(argv):
               f" of {c['ptr_as_int']}")
         print(f"  confident-wrong of all: before {pct(c['claim_wrong'], c['total'])}"
               f"  after filtering {pct(c['missed_wrong'], c['total'])}")
+        print(f"  wrong KIND of type, of all: before {pct(c['kind_wrong'], c['total'])}"
+              f"  after filtering {pct(c['kind_wrong_kept'], c['total'])}")
         print(f"  abstentions with an evidence proposal {pct(c['abstain_proposed'], c['ABSTAIN'])},"
               f" proposal right {pct(c['abstain_proposal_ok'], c['abstain_proposed'])}")
         rules = sorted({r for r, _ in rule_hits[kind]})

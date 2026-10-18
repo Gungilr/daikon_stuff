@@ -1,6 +1,6 @@
 # Plan — checking recovered types against the binary (type-only "matching")
 
-Status: **drafted, not started.** Prerequisite: the REA/Ghidra measurement on the
+Status: **Stage 1 complete — all three criteria met.** Stage 2 not started. Prerequisite: the REA/Ghidra measurement on the
 ReSym test set (94 binaries, 18,551 functions, 44,366 parameters, 3,363 globals),
 harness in `scripts/rea_eval/`.
 
@@ -100,6 +100,38 @@ still emits what the evidence supports (e.g. "pointer, struct-like, fields at
 
 If 1 or 2 fail, the evidence is too weak to anchor an AI loop and Stage 2
 should not start as designed.
+
+## Stage 1 result (94 binaries, scored against DWARF, 2026-10-18)
+
+p-code collected for 24,428 functions; 0.36% errored or truncated (stop threshold 10%).
+`python3 scripts/rea_eval/check.py bench/resym/sample/truth.jsonl bench/resym/rea_out bench/resym/pcode`
+
+| | params | returns | globals |
+|---|---|---|---|
+| Ghidra's wrong answers caught | **63.8%** | 16.9% | **87.4%** |
+| Ghidra's right answers wrongly rejected | **0.7%** | 2.9% | 0.7% |
+| pointer-called-integer errors caught | **86.2%** of 8,969 | 37.7% of 416 | — |
+| wrong KIND of type, of all: before → after | **22.9% → 4.5%** | 8.2% → 6.7% | 6.6% → 0.8% |
+| any wrong detail (kind/pointee/sign/size): before → after | 34.4% → 12.4% | 17.3% → 14.4% | 6.6% → 0.8% |
+| Ghidra abstained but evidence proposes pointer/scalar/float | 32.8%, right 95.9% | 12.1%, right 99.9% | 18.8%, right 95.0% |
+
+Criteria: (1) pointer→integer caught 86.2% ≥ 50% ✓  (2) false rejects 0.7% ≤ 5% ✓
+(3) confident-wrong kind 22.9% → 4.5% ≤ 11% ✓.
+
+Per rule (catches / false rejects), params: R1 7,894/45, R3 408/42, R4 14/0, R5 7/0, R6 1,080/10;
+returns: R1 158/8, R3 137/78, R5 11/1; globals: R7 194/2. No rule rejects more than it catches.
+
+Hand check of 20 random parameter verdicts against pseudocode and the answer key:
+10/10 FAILs were genuinely wrong Ghidra types; 10/10 PASSes had the right kind.
+
+**Weak spot: return values.** Most returns have NO-EVIDENCE (3,153 of 4,806 answers) - a
+returned value is only "seen" through its producer and through callers, and R3 from
+callers' compares is the noisiest rule (137 catches / 78 false rejects).
+
+**Implementation notes.** A struct returned by value (> 16 bytes) arrives as a hidden
+first pointer, so parameters are realigned before comparison. R2 (width) and R8 (void
+return) are not implemented: Ghidra's high p-code is shaped by its own prototype, so that
+evidence would be circular.
 
 ---
 
