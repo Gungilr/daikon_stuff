@@ -1,0 +1,15 @@
+# Seeds for arith.c: three little-endian i32 words (x, y, z).
+# Deliberately narrow - small positives with y <= z - so Daikon starts out
+# overconfident and the loop has something to refute.
+i32: 5 3 9
+i32: 12 7 40
+i32: 1 1 1
+i32: 30 2 31
+i32: 8 15 20
+i32: 44 9 50
+i32: 3 25 26
+i32: 17 4 99
+i32: 21 21 60
+i32: 9 30 31
+i32: 2 6 7
+i32: 60 11 70

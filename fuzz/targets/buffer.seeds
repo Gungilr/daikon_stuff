@@ -1,0 +1,14 @@
+# Seeds for buffer.c: raw bytes, up to 16 used. Lowercase text and short
+# digit runs, so the uppercase, high-byte and overflow paths start unseen.
+str: hello
+str: abc
+str: zzzz
+str: fuzzing
+str: 42
+str: 7abc
+str: 1234
+str: daikon
+str: x9
+str: loop
+str: 00
+str: q

@@ -22,6 +22,7 @@ is the research output.
 | [phase10.md](phase10.md) | — | Globals as deref roots; struct globals | **B landed (opt-in), C measured harmful**; A/D/E not started |
 | [../VERIFICATION.md](../VERIFICATION.md) | — | What can be formally verified, and what cannot | **reviewed** — 1 defect found |
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
+| [../FUZZ-LOOP.md](../FUZZ-LOOP.md) | — | Daikon + fuzzer loop on source-available targets (Kvasir front-end) | **working** — black-box tracer not yet plugged in |
 
 Tier 4 was skipped after measurement, and re-measured after tier 5 landed: the
 range-based classifier in `memmap.py` now gets **7 of 7** pointers right
@@ -35,9 +36,14 @@ exercise them. Current standing
 against the oracle: **precision 65%, recall 92%, F1 76%**, with eight of ten
 binaries at 100% recall.
 
-Remaining work is the fuzzing-loop infrastructure (no input mechanism exists
-yet; ~11s per iteration is dominated by Python and JVM startup rather than the
-~650 instructions of actual emulation), and two measurement-driven items:
+Remaining work is plugging the black-box tracer into the fuzzing loop. The
+loop itself now exists for source-available targets
+([../FUZZ-LOOP.md](../FUZZ-LOOP.md)): it uses Kvasir as the front-end, has
+an input mechanism (a batch harness that runs hundreds of inputs per process),
+and costs about a second of Valgrind start-up per batch rather than per
+input. The tracer still has no input mechanism, and ~11s per iteration is
+dominated by Python and JVM startup rather than the ~650 instructions of
+actual emulation. There are also two measurement-driven items:
 bounding a stack pointee so `--infer-from-caller` can be safe enough to default
 on, and real modbits, which is where the remaining precision headroom is.
 

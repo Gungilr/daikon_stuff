@@ -21,6 +21,8 @@ __pycache__/
 traces/
 invariants/
 daikon-output/
+#   fuzz-out/      scripts/fuzz_loop.py output: corpus, per-round reports
+fuzz-out/
 *.inv.gz
 
 # Compiled test binaries - rebuilt by `make`. The .c sources are tracked.
