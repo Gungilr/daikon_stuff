@@ -172,7 +172,45 @@ violated that Daikon still reports is a bug. Every run lists these under
 
 ## 3. Results
 
-Measurements in progress; see the commit that follows.
+Each target was run three times (`--seed 0..2`) with up to 10 rounds,
+batches of 1000 and patience 2. Each was run again with `--no-guidance`,
+which keeps inputs for new coverage only, so invariants steer nothing. That
+is a plain coverage-guided fuzzer whose corpus Daikon re-reads. One round costs
+about 4s of Kvasir and 0.6s of Daikon. Native execution is under 0.1s.
+
+| target | mode | rounds to fixed point | refuted | survived | false invariants left standing* |
+|---|---|---|---|---|---|
+| arith | guided | 5 / 8 / 4 | 38 / 38 / 38 | 14 / 14 / 14 | 0 / 0 / 0 |
+| arith | coverage only | 7 / 8 / 9 | 36 / 38 / 38 | 16 / 14 / 14 | 2 / 0 / 0 |
+| buffer | guided | 5 / 6 / 5 | 46 / 45 / 47 | 50 / 50 / 49 | 0 / 0 / 0 |
+| buffer | coverage only | 5 / 3 / 4 | 43 / 27 / 41 | 53 / 59 / 54 | 3 / 16 / 5 |
+
+\* refuted by the other mode on the same seed, so demonstrably false. This
+is a lower bound: an invariant that *both* modes failed to refute is not
+counted.
+
+Read per seed:
+
+- **Guided never missed anything coverage-only refuted**, on any seed, and
+  converged on arith in fewer rounds on two seeds of three.
+- What coverage-only leaves standing is exactly the class distance targets:
+  `return != size(buf[])-1` (needs `count_upper` to return exactly 15),
+  `n >= 1` (needs the empty input), `x != 0`. None of these opens a new edge,
+  so a coverage fuzzer has no reason to keep the input that breaks them.
+- On buffer seed 1, coverage-only hit its fixed point after **three** rounds
+  with 16 false invariants alive, including `parse_digits: return >= 0`.
+  Plateauing early is worse than failing slowly, because the summary then
+  reports those 16 as having survived.
+- There were zero disagreements in all 12 runs: the fuzzer and Daikon never
+  differed on whether an invariant had been violated.
+
+What the loop finds on `arith.c`, every seed: `abs_diff: return >= 0`
+refuted by a wrapping subtraction (a real bug, by `-fwrapv` design here);
+`lookup: return >= 0` refuted by `0x5eed1337`, reached through the
+trace-cmp dictionary; the seed bias (`x >= 1`, `return == 1`, `key ==
+return`) gone in round 1. The control holds: `clamp`'s `lo <= return` and
+`hi >= return` survive. On `buffer.c`, `parse_digits: return >= 0` falls to a
+run of fifteen `9`s, and `n >= 1` falls to the empty input.
 
 ## 4. Limits, stated plainly
 
