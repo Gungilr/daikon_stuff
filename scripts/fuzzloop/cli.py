@@ -37,6 +37,9 @@ def main(argv=None):
     ap.add_argument("--no-guidance", action="store_true",
                     help="ablation baseline: keep inputs for new coverage only, "
                          "so invariants steer nothing")
+    ap.add_argument("--no-coverage", action="store_true",
+                    help="ablation: keep inputs for invariant progress only, so "
+                         "coverage steers nothing")
     ap.add_argument("--daikon-arg", action="append", default=[],
                     help="extra argument passed to Daikon (repeatable)")
     args = ap.parse_args(argv)
@@ -53,7 +56,8 @@ def main(argv=None):
                     batches_per_round=args.batches, rounds=args.rounds,
                     patience=args.patience, max_len=args.max_len,
                     keep_is_param=args.keep_is_param, conf_limit=args.conf_limit,
-                    daikon_args=args.daikon_arg, guidance=not args.no_guidance)
+                    daikon_args=args.daikon_arg, guidance=not args.no_guidance,
+                    coverage=not args.no_coverage)
     try:
         loop.run()
     except runner.ToolError as e:

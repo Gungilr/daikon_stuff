@@ -91,7 +91,7 @@ class FuzzLoop(object):
     def __init__(self, target_c, out_dir, daikondir, seeds=None, rng_seed=0,
                  batch_size=200, batches_per_round=3, rounds=10, patience=2,
                  max_len=64, keep_is_param=False, conf_limit=0.0,
-                 daikon_args=(), guidance=True, log=print):
+                 daikon_args=(), guidance=True, coverage=True, log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -107,6 +107,9 @@ class FuzzLoop(object):
         # False gives the ablation baseline: a plain coverage-guided fuzzer
         # whose corpus Daikon re-reads, with invariants steering nothing.
         self.guidance = guidance
+        # False gives the opposite ablation: invariants are the only metric,
+        # and new coverage alone never keeps an input.
+        self.coverage = coverage
         self.daikon_args = list(daikon_args)
         self.log = log
         self.mutator = Mutator(self.rng, max_len=max_len)
@@ -212,7 +215,7 @@ class FuzzLoop(object):
         reasons = []
         if force:
             reasons.append("seed")
-        if new_feats:
+        if new_feats and self.coverage:
             reasons.append("coverage+%d" % len(new_feats))
         if violations and self.guidance:
             reasons.append("violates %d" % len(violations))
@@ -363,7 +366,7 @@ class FuzzLoop(object):
             self.round_log.append({"round": r, "invariants": n_inv, "refuted": len(refuted),
                                    "corpus": len(self.corpus),
                                    "features": len(self.seen_features)})
-            quiet = quiet + 1 if (not refuted and new_feats == 0) else 0
+            quiet = quiet + 1 if (not refuted and (new_feats == 0 or not self.coverage)) else 0
             if quiet >= self.patience:
                 self.log("[+] fixed point: %d quiet round(s)" % quiet)
                 break

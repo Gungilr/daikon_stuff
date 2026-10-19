@@ -204,6 +204,23 @@ Read per seed:
 - There were zero disagreements in all 12 runs: the fuzzer and Daikon never
   differed on whether an invariant had been violated.
 
+### Invariants alone (`--no-coverage`)
+
+The opposite ablation keeps an input only when it moves closer to violating
+an invariant, or violates one. New coverage alone never keeps it.
+
+| target | rounds to fixed point | corpus | missed vs. guided | found that guided missed |
+|---|---|---|---|---|
+| arith | 4 / 4 / 4 | 21 / 18 / 20 | 0 / 0 / 0 | 0 / 0 / 0 |
+| buffer | 10 / 5 / 6 | 29 / 35 / 35 | 0 / 0 / 1 | 2 / 0 / 1 |
+
+On these two targets invariants alone are about as good as both metrics
+together, with a corpus 3-7x smaller. Both targets flatter it, though:
+`fuzz_target` calls every function on every input, so there is no code
+reachable only through a branch. Daikon has no invariants about code that
+has never run, so invariant distance cannot steer toward it. That case is
+untested here and is where coverage should matter.
+
 What the loop finds on `arith.c`, every seed: `abs_diff: return >= 0`
 refuted by a wrapping subtraction (a real bug, by `-fwrapv` design here);
 `lookup: return >= 0` refuted by `0x5eed1337`, reached through the
