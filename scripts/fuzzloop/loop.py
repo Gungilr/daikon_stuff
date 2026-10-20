@@ -83,6 +83,14 @@ class History(object):
                 refuted.append(rec)
         return refuted
 
+    def proposed_in(self, round_):
+        """Invariants Daikon reported for the first time in this round.
+
+        After round 0 these are almost always WEAKER restatements of a
+        refuted one (`x >= 1` falls, `x >= -5` appears), or facts that only
+        became justified once the corpus grew."""
+        return [r for r in self.inv.values() if r["first_round"] == round_]
+
     def alive(self):
         return [r for r in self.inv.values() if r["refuted_round"] is None]
 
@@ -135,6 +143,7 @@ class FuzzLoop(object):
                       "seconds_native": 0.0, "seconds_kvasir": 0.0,
                       "seconds_daikon": 0.0}
         self.round_log = []
+        self.keep_counts = {}     # per round: why kept inputs were kept
 
     # -- setup -------------------------------------------------------------
 
@@ -255,6 +264,10 @@ class FuzzLoop(object):
             reasons.append("closer to %d" % len(progress))
         if not reasons:
             return None
+        for kind, hit in (("coverage", new_feats), ("violation", violations),
+                          ("closer", progress and not force)):
+            if hit and not force:
+                self.keep_counts[kind] = self.keep_counts.get(kind, 0) + 1
 
         idx = len(self.corpus)
         entry = Entry(data, samples, round_, ", ".join(reasons))
@@ -371,6 +384,9 @@ class FuzzLoop(object):
         if not self.corpus:
             raise runner.ToolError("no seed ran cleanly; nothing to infer from")
         report, _ = self._infer(0)
+        # Baseline distances over the seeds, so "closer" in round 1 means
+        # closer than the seeds got, not merely "measured for the first time".
+        self._update_min_distances()
         n_inv = sum(len(v) for v in report.values())
         self.log("[+] round 0: %d invariants over %d ppts from %d seeds "
                  "(%d not checkable by the fuzzer)" % (
@@ -381,6 +397,11 @@ class FuzzLoop(object):
         quiet = 0
         for r in range(1, self.rounds + 1):
             feats_before = len(self.seen_features)
+            execs_before = self.stats["execs"]
+            crashes_before = len(self.crashes)
+            dist_before = {k: rec["min_distance"] for k, rec in self.history.inv.items()
+                           if rec["refuted_round"] is None}
+            self.keep_counts = {}
             added = 0
             for _ in range(self.batches_per_round):
                 cands = []
@@ -410,9 +431,34 @@ class FuzzLoop(object):
                     rec["ppt"], rec["text"],
                     "" if rec["violated_by"] is None
                     else "   <- %s" % (rec["violated_by"] or "(empty input)")))
-            self.round_log.append({"round": r, "invariants": n_inv, "refuted": len(refuted),
-                                   "corpus": len(self.corpus),
-                                   "features": len(self.seen_features)})
+            proposed = self.history.proposed_in(r)
+            closer = []
+            for k, before in dist_before.items():
+                rec = self.history.inv[k]
+                after = rec["min_distance"]
+                if (rec["refuted_round"] is None and after is not None
+                        and before is not None and after < before):
+                    closer.append((rec["ppt"], rec["text"], before, after))
+            for rec in proposed:
+                self.log("      new      %-28s %s" % (rec["ppt"], rec["text"]))
+            for ppt, text, before, after in sorted(closer, key=lambda c: c[3])[:8]:
+                self.log("      closer   %-28s %-30s distance %s -> %g" % (
+                    ppt, text, "?" if before is None else "%g" % before, after))
+            self.log("      kept: %s; executions %d; dictionary %d; crashes +%d" % (
+                ", ".join("%s %d" % kv for kv in sorted(self.keep_counts.items()))
+                or "nothing", self.stats["execs"] - execs_before,
+                len(self.mutator.dictionary), len(self.crashes) - crashes_before))
+            self.round_log.append({
+                "round": r, "invariants": n_inv, "refuted": len(refuted),
+                "proposed": len(proposed), "corpus": len(self.corpus),
+                "features": len(self.seen_features),
+                "executions": self.stats["execs"] - execs_before,
+                "kept": dict(self.keep_counts),
+                "dictionary": len(self.mutator.dictionary),
+                "crashes": len(self.crashes) - crashes_before,
+                "refuted_list": [[x["ppt"], x["text"], x["violated_by"]] for x in refuted],
+                "proposed_list": [[x["ppt"], x["text"]] for x in proposed],
+                "closer_list": [list(c) for c in closer]})
             quiet = quiet + 1 if (not refuted and (new_feats == 0 or not self.coverage)) else 0
             if quiet >= self.patience:
                 self.log("[+] fixed point: %d quiet round(s)" % quiet)

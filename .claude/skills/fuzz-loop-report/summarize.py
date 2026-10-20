@@ -54,6 +54,23 @@ def detail(run, h):
     print("|---|---|---|---|---|")
     for r in h["rounds"]:
         print("| %(round)d | %(invariants)d | %(refuted)d | %(corpus)d | %(features)d |" % r)
+    if any("executions" in r for r in h["rounds"]):
+        print("\nper round:")
+        for r in h["rounds"][1:]:
+            kept = ", ".join("%s %d" % kv for kv in sorted(r.get("kept", {}).items()))
+            print("  round %d: %d executions, kept %d (%s), refuted %d, newly proposed %d, "
+                  "dictionary %d, crashes %d" % (
+                      r["round"], r.get("executions", 0),
+                      sum(r.get("kept", {}).values()), kept or "-", r["refuted"],
+                      r.get("proposed", 0), r.get("dictionary", 0), r.get("crashes", 0)))
+            for ppt, text, by in r.get("refuted_list", []):
+                print("      refuted   %-30s %-34s <- %s" % (ppt, text, show_input(by)))
+            for ppt, text in r.get("proposed_list", []):
+                print("      proposed  %-30s %s" % (ppt, text))
+            for ppt, text, before, after in sorted(r.get("closer_list", []),
+                                                   key=lambda c: c[3])[:8]:
+                print("      closer    %-30s %-34s %s -> %g" % (
+                    ppt, text, "?" if before is None else "%g" % before, after))
     s = h["stats"]
     tool = s.get("seconds_tracer", 0) + s.get("seconds_kvasir", 0)
     execs = s["execs"]

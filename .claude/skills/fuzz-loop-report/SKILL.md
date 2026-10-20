@@ -30,8 +30,9 @@ python3 -c "import unicorn, capstone, elftools"        # tracer front-end only
 
 ## 2. Running
 
-Pick the front-end from what the user asked for. If it is ambiguous whether
-they mean source or blackbox, ask.
+**Default for now: source code with regular Daikon (`--frontend kvasir`).**
+The user asked to work this way until they say otherwise. Use the blackbox
+front-end only when they ask for it by name.
 
 | front-end | flag | traces | coverage from |
 |---|---|---|---|
@@ -79,7 +80,7 @@ the names.
 
 ## 4. Response format
 
-Use exactly these three sections, in this order.
+Use exactly these four sections, in this order.
 
 ### Results
 
@@ -99,6 +100,29 @@ Two to five plain sentences: what was run, on what, and with which settings.
 Name the front-end explicitly, saying "source code (Kvasir)" or "blackbox
 (stripped binary, your tracer)". The user has had to ask which one was used
 before, so never leave it implicit.
+
+### Round by round
+
+The user wants the intermediate output of every iteration, not only the end
+state. For each round, from the loop's log or the `per round:` block of
+`summarize.py`:
+
+- **Inputs:** executions run, and how many inputs were kept and why
+  (coverage / violation / closer).
+- **Refuted rules:** each rule refuted that round, with the input that broke
+  it.
+- **New rules:** each rule newly proposed, and whether it is a weaker
+  restatement of one just refuted (for example `x >= 1` falls and `x >= -5`
+  appears).
+- **Near-misses:** rules the fuzzer got closer to breaking without breaking
+  them (distance before -> after).
+- **Anything unusual:** a rule coming back after being refuted, a crash, a
+  round where nothing was kept, the dictionary growing, or a quiet round that
+  counts toward the stopping point.
+
+Put this in a compact table (round | executions | kept | refuted | new |
+notable), then one or two lines per round under it for the notable events.
+Do not pad rounds where nothing happened; say "quiet round" and move on.
 
 ### Reasoning and analysis
 
