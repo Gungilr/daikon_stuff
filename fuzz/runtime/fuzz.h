@@ -22,7 +22,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
+
+/* Forced inline even at -O0, so the helpers never become program points of
+ * their own. That matters most for stripped binaries, where they could not be
+ * filtered out by name. */
+#define FUZZ_INLINE static inline __attribute__((always_inline))
 
 typedef struct {
     const uint8_t *data;
@@ -30,7 +34,7 @@ typedef struct {
     size_t pos;
 } fuzz_cursor;
 
-static inline fuzz_cursor fuzz_cursor_make(const uint8_t *data, size_t size) {
+FUZZ_INLINE fuzz_cursor fuzz_cursor_make(const uint8_t *data, size_t size) {
     fuzz_cursor c = {data, size, 0};
     return c;
 }
@@ -38,7 +42,7 @@ static inline fuzz_cursor fuzz_cursor_make(const uint8_t *data, size_t size) {
 /* Little-endian reads. Past the end of the input every read yields zero, so
  * a short input is always valid - the fuzzer never wastes executions on
  * inputs the target rejects for length. */
-static inline uint32_t fuzz_take_u32(fuzz_cursor *c) {
+FUZZ_INLINE uint32_t fuzz_take_u32(fuzz_cursor *c) {
     uint32_t v = 0;
     for (int i = 0; i < 4; i++) {
         if (c->pos < c->size)
@@ -47,20 +51,22 @@ static inline uint32_t fuzz_take_u32(fuzz_cursor *c) {
     return v;
 }
 
-static inline int32_t fuzz_take_i32(fuzz_cursor *c) {
+FUZZ_INLINE int32_t fuzz_take_i32(fuzz_cursor *c) {
     return (int32_t)fuzz_take_u32(c);
 }
 
-static inline uint8_t fuzz_take_u8(fuzz_cursor *c) {
+FUZZ_INLINE uint8_t fuzz_take_u8(fuzz_cursor *c) {
     return c->pos < c->size ? c->data[c->pos++] : 0;
 }
 
-/* Copies up to `cap` bytes; returns how many were copied. */
-static inline size_t fuzz_take_bytes(fuzz_cursor *c, uint8_t *out, size_t cap) {
+/* Copies up to `cap` bytes; returns how many were copied. A plain loop, not
+ * memcpy: under the emulation tracer, calls into libc are skipped. */
+FUZZ_INLINE size_t fuzz_take_bytes(fuzz_cursor *c, uint8_t *out, size_t cap) {
     size_t n = c->size - c->pos;
     if (n > cap)
         n = cap;
-    memcpy(out, c->data + c->pos, n);
+    for (size_t i = 0; i < n; i++)
+        out[i] = c->data[c->pos + i];
     c->pos += n;
     return n;
 }

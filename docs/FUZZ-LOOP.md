@@ -251,20 +251,118 @@ run of fifteen `9`s, and `n >= 1` falls to the empty input.
   Daikon's splitter. Daikon still re-checks them every round.
 - **Targets must be stateless** between `fuzz_target` calls, as above.
 
-## 5. Plugging in the black-box tracer
+## 5. The black-box front-end: your tracer on a stripped binary
 
-The loop touches the front-end in exactly two places. `runner.run_kvasir`
-produces per-input samples, and `runner.build` produces the traced binary.
-The tracer needs:
+```bash
+python3 scripts/fuzz_loop.py fuzz/targets/arith.c  --frontend tracer --tier 3
+python3 scripts/fuzz_loop.py fuzz/targets/buffer.c --frontend tracer --tier 7
+```
 
-1. **An input mechanism**: the open item since the phase-5 retrospective.
-   The batch harness is the obvious shape. Emulate one process, call
-   `fuzz_target` per record, and emit a `fuzz_input_begin` sample between
-   records. The emulator then pays its 2.5s start-up once per batch, as
-   Kvasir does.
-2. **A marker it can see without symbols.** In a stripped binary
-   `fuzz_input_begin` has no name, but it is the one function called between
-   records with the record index in `rdi`.
+The target is compiled once with `fuzz/runtime/harness_bb.c` and stripped with
+`strip --strip-all`. From then on the loop only touches the stripped file.
+The emulation tracer (`scripts/tracer`, run with `--scan-prologues`) supplies
+**both** halves: the variable values Daikon needs, and the edge coverage and
+comparison constants the fuzzer needs. No Kvasir, no native build, no
+symbols, no DWARF.
 
-Everything downstream (splitting, renumbering, distance, refutation, the
-summary) works on any Daikon trace, whoever wrote it.
+### Input mechanism
+
+This was the open item since the phase-5 retrospective. Feeding the program
+through a file or stdin would mean emulating libc. Instead the harness owns one
+initialized global, which lands in `.data`, and section contents survive
+stripping:
+
+```
+struct { char magic[16] = "DAIKON-FUZZ-BLOB"; uint32_t len; uint8_t data[4096]; }
+```
+
+With `--fuzz-batch FILE`, the tracer scans the loaded image for the magic and
+requires exactly one hit. For each input it starts a **fresh emulator**,
+writes `len` and the bytes, and runs `main` until it returns. Before each
+input it buffers a `fuzz_input_begin` marker sample. That is the same marker
+the Kvasir path traces, so `dtrace.split_by_input` works unchanged. A fresh
+emulator per input also means targets need not be stateless in this mode.
+Arity, footprint and global evidence still accumulate across inputs, exactly
+as across `--layouts`, so each function's schema is decided over the whole
+batch. Without `--fuzz-batch` nothing changes: the golden traces are
+byte-identical.
+
+`--fuzz-cov-out FILE` writes one JSON line per input with:
+
+- **edges**: AFL-style `(prev >> 1) ^ cur` over basic blocks, from
+  `UC_HOOK_BLOCK`.
+- **consts**: immediates of every executed `cmp`. This is the stripped-binary
+  analogue of trace-cmp, and it is how `lookup`'s `0x5eed1337` is reached.
+- **status**: `ok`, an emulator error, or `insn-limit`. Anything but `ok` is
+  filed as a crash or hang.
+
+### Why the corpus is re-traced every round
+
+Kvasir's declarations come from DWARF and never change. The tracer's come
+from evidence: arity, pointees and array bounds are decided per run, so two
+batches can declare the same function differently. Mixing their samples would
+hand Daikon conflicting declarations. In tracer mode, the loop therefore
+re-traces the whole corpus in a single run before every Daikon pass. That
+gives one consistent set of declarations, and every entry's samples are
+refreshed to match. It costs one extra tracer run per round.
+
+### Results (seed 0, batches of 300, 2 per round)
+
+| target | rounds | refuted | survived | wall time | disagreements |
+|---|---|---|---|---|---|
+| arith (tier 3) | 5 | 56 | 24 | 80s | 0 |
+| buffer (tier 7) | 6 | 117 | 86 | 167s | 0 |
+
+The same bugs fall as with Kvasir, found from the stripped binary:
+
+- `sub_0x401142` (abs_diff): `return >= 0`, by a wrapping subtraction.
+- `sub_0x401168` (lookup): `return >= 0`, by the magic key from the cmp
+  dictionary. Its survivor is `return >= -1`.
+- `sub_0x4011a8` (parse_digits): `return >= 0`, by fifteen `9`s.
+
+The control survives: `sub_0x40118b` (clamp) keeps `arg1 <= return` and
+`arg2 >= return`.
+
+### What the loop shows about the tracer
+
+Rules the fuzzer cannot refute are either true or an artifact that is
+identical on every input. The second kind points straight at tracer
+heuristics:
+
+- **`size(arg0[]) == 64` for a 16-byte buffer.** The tracer bounds a stack
+  pointee with no allocation size by guessing, and here it guesses four times
+  too large. Every invariant mentioning `size(arg0[])` inherits the error.
+  `arg1 < size(arg0[])-1` survives with closest approach 47, because the
+  fuzzer cannot push a 16-byte input to 63.
+- **`fuzz_target` has a `return`.** It is `void`; tier 3 reports `rax` unless
+  `--detect-void` is passed.
+- **`arg0 has only one value` / `arg0 != null`** on every function: the buffer
+  is always the same stack array. This is a harness artifact, as in the Kvasir
+  mode.
+
+### Cost
+
+Measured from the two runs above, after taking out about 2s of tracer
+start-up per batch: about **15ms per input at tier 3** (arith) and **33ms at
+tier 7** (buffer). The Kvasir mode amortizes to about 1.5ms per input at batch
+size 1000. So the tracer is roughly 10-20x slower per execution than the
+Kvasir mode, and far slower than native, because every instruction goes
+through a Python hook. This is
+the speed gap the Binvariants comparison predicted. The fast path would be
+unicornafl for coverage, with the full tracer run only on inputs worth
+keeping.
+
+### Known gaps
+
+- **Crashes are mostly invisible.** The tracer lazily maps unmapped memory,
+  so a wild pointer reads zeros instead of faulting. Only emulator errors and
+  the instruction limit are reported.
+- **The start function is dropped by name; `fuzz_target` is not.** It cannot
+  be recognized without symbols, so its invariants (input length, buffer
+  pointer) appear in the report.
+- **Calls into libc are skipped.** That is why `fuzz.h` copies with a loop
+  instead of `memcpy`. Targets that depend on libc results will be traced
+  wrong.
+
+Everything downstream of the front-end (splitting, renumbering, distance,
+refutation, the summary) is shared between the two modes.

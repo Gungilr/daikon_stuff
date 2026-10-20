@@ -44,7 +44,8 @@ int parse_digits(const unsigned char *buf, int n) {
 
 void fuzz_target(const uint8_t *data, size_t size) {
     unsigned char buf[CAP];
-    memset(buf, 0, sizeof buf);
+    for (int i = 0; i < CAP; i++)   /* not memset: libc is skipped under emulation */
+        buf[i] = 0;
     fuzz_cursor c = fuzz_cursor_make(data, size);
     int n = (int)fuzz_take_bytes(&c, buf, CAP);
 

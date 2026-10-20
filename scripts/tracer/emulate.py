@@ -19,7 +19,7 @@ try:
     from unicorn import (
         Uc, UcError,
         UC_ARCH_X86, UC_MODE_32, UC_MODE_64,
-        UC_HOOK_CODE,
+        UC_HOOK_CODE, UC_HOOK_BLOCK,
         UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
         UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
         UC_HOOK_MEM_FETCH_UNMAPPED,
@@ -42,6 +42,7 @@ except ImportError as e:
     sys.exit(1)
 
 from .alloc import Arena
+from . import fuzzinput
 from .globalvars import GlobalTable
 from .deref import (POISON_BYTE, FootprintTracker, GlobalAccessMap,
                     array_width_from_allocation,
@@ -229,6 +230,12 @@ class Tracer:
         self.cs = None
         self.var_names = []
         self.resolved_start_addr = None
+        # Fuzz-input mode (--fuzz-batch): index into self.pending at which
+        # each input's samples begin, and per-input edge coverage.
+        self.input_starts = []      # [(pending index, input id)]
+        self._cov_edges = None
+        self._cov_prev = 0
+        self._cov_consts = None     # immediates compared against, per input
 
     # ---- Filtering ----
     def _filter_functions(self, functions):
@@ -1220,6 +1227,9 @@ class Tracer:
             insn = i
             break
 
+        if self._cov_consts is not None and insn is not None:
+            self._note_cmp_constant(insn)
+
         # Function entry?
         if address in self.functions:
             func_name = self.functions[address]
@@ -1734,8 +1744,14 @@ class Tracer:
                 self.log.verbose(f"  global {obj!r}")
 
         schemas = {}
-        for (ppt_name, ppt_type, func_addr, raw, nonce, blobs,
-             gsnap) in self.pending:
+        markers = dict(self.input_starts)
+        if markers:
+            self.dtrace.declare(fuzzinput.MARKER_PPT, "enter",
+                                [VarSpec(fuzzinput.MARKER_VAR)])
+        for i, (ppt_name, ppt_type, func_addr, raw, nonce, blobs,
+                gsnap) in enumerate(self.pending):
+            if i in markers:
+                self._emit_marker(markers.pop(i))
             is_exit = ppt_type != "enter"
             key = (func_addr, is_exit)
             if key not in schemas:
@@ -1748,6 +1764,10 @@ class Tracer:
                 values = list(values) + self._global_values(gsnap)
             self.dtrace.declare(ppt_name, ppt_type, specs)
             self.dtrace.add_sample(ppt_name, values, nonce=nonce)
+        # Inputs that produced no samples at all still get their marker, so
+        # every input id appears in the trace exactly once.
+        for _, input_id in sorted(markers.items()):
+            self._emit_marker(input_id)
 
         if self._arity_enabled():
             for addr, name in sorted(self.functions.items()):
@@ -1757,6 +1777,37 @@ class Tracer:
                         f"  arity {name} @0x{addr:x}: "
                         f"{n_reg} reg + {n_stack} stack = {n_reg + n_stack}"
                     )
+
+    def _emit_marker(self, input_id):
+        self.dtrace.add_sample(fuzzinput.MARKER_PPT, [input_id],
+                               nonce=self._alloc_nonce())
+
+    def _hook_block(self, uc, address, size, user_data):
+        # AFL-style edge: (prev >> 1) ^ cur. Addresses are absolute, which is
+        # stable here because the emulated image never moves.
+        self._cov_edges.add(((self._cov_prev >> 1) ^ address) & 0xFFFFFFFF)
+        self._cov_prev = address
+
+    def _note_cmp_constant(self, insn):
+        """Collect the immediate of a `cmp`, the stripped-binary analogue of
+        SanitizerCoverage's trace-cmp: `cmp eax, 0x5eed1337` hands the fuzzer
+        a magic value that random mutation would essentially never guess."""
+        if insn.mnemonic != "cmp" or "," not in insn.op_str:
+            return
+        operand = insn.op_str.rsplit(",", 1)[1].strip()
+        try:
+            value = int(operand, 0)
+        except ValueError:
+            return                     # register or memory operand
+        if value not in (0, 1) and len(self._cov_consts) < 64:
+            self._cov_consts.add(value & 0xFFFFFFFFFFFFFFFF)
+
+    def _fuzz_inputs(self):
+        path = getattr(self.args, "fuzz_batch", None)
+        if not path:
+            return None
+        with open(path, "rb") as f:
+            return fuzzinput.parse_batch(f.read())
 
     # ---- Entry point ----
     def run(self):
@@ -1885,6 +1936,10 @@ class Tracer:
         # behavior exactly.
         timeout_us = self.args.timeout * 1_000_000 if self.args.timeout else 0
 
+        inputs = self._fuzz_inputs()
+        if inputs is not None:
+            return self._run_fuzz_inputs(inputs, start_addr, timeout_us)
+
         for layout in range(self.args.layouts):
             self._layout_index = layout
             stack_base = self.args.stack_base + layout * LAYOUT_STRIDE
@@ -1933,5 +1988,72 @@ class Tracer:
         self.log.info(f"[+] Instructions:    {self.insn_count}")
         self.log.info(f"[+] Skipped calls:   {self.skipped_calls}")
         self.log.info(f"[+] Program points:  {len(self.dtrace.ppt_specs)}")
+        self.log.info(f"[+] Samples:         {len(self.dtrace.data_samples)}")
+        return 0
+
+    def _run_fuzz_inputs(self, inputs, start_addr, timeout_us):
+        """--fuzz-batch: run main once per input, in a fresh emulator each
+        time, writing the input into the harness's magic buffer first.
+
+        Each input gets a new Uc instance from _setup_memory, so no state
+        leaks from one input to the next and targets need not be stateless.
+        Arity, footprint and global evidence still accumulate across inputs,
+        exactly as across --layouts, so schemas are decided over all of them.
+        """
+        blob = fuzzinput.find_blob(self.segments)
+        if blob is None:
+            self.log.error("--fuzz-batch: the binary has no single "
+                           f"{fuzzinput.BLOB_MAGIC!r} input buffer "
+                           "(build it with fuzz/runtime/harness_bb.c)")
+            return 1
+        self.log.info(f"[+] Input buffer at 0x{blob:x}; {len(inputs)} input(s)")
+        cov_path = getattr(self.args, "fuzz_cov_out", None)
+        cov_f = open(cov_path, "w") if cov_path else None
+
+        for input_id, data in enumerate(inputs):
+            self.input_starts.append((len(self.pending), input_id))
+            self._setup_memory(self.args.stack_base)
+            self.mu.mem_write(blob + fuzzinput.LEN_OFFSET,
+                              fuzzinput.encode_input(data))
+            self.call_stack = []
+            self._layout_insn_count = 0
+            self._cov_edges, self._cov_prev = set(), 0
+            self._cov_consts = set() if cov_f is not None else None
+
+            self.mu.hook_add(UC_HOOK_CODE, self._hook_code)
+            if cov_f is not None:
+                self.mu.hook_add(UC_HOOK_BLOCK, self._hook_block)
+            if self._deref_enabled():
+                self.mu.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                                 self._hook_mem_deref)
+            self.mu.hook_add(
+                UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED
+                | UC_HOOK_MEM_FETCH_UNMAPPED,
+                self._hook_mem_unmapped,
+            )
+            status = "ok"
+            try:
+                self.mu.emu_start(start_addr, start_addr + 0x1000000,
+                                  timeout=timeout_us)
+            except UcError as e:
+                status = f"error: {e}"
+            if (self.args.max_insns
+                    and self._layout_insn_count >= self.args.max_insns):
+                status = "insn-limit"
+            if cov_f is not None:
+                cov_f.write(json.dumps({
+                    "id": input_id, "status": status,
+                    "start_func": self.functions.get(start_addr),
+                    "insns": self._layout_insn_count,
+                    "edges": sorted(self._cov_edges),
+                    "consts": sorted(self._cov_consts)}) + "\n")
+
+        if cov_f is not None:
+            cov_f.close()
+        self._finalize()
+        self.dtrace.close()
+        self.log.info(f"[+] Daikon trace:    {self.args.output}")
+        self.log.info(f"[+] Inputs:          {len(inputs)}")
+        self.log.info(f"[+] Instructions:    {self.insn_count}")
         self.log.info(f"[+] Samples:         {len(self.dtrace.data_samples)}")
         return 0

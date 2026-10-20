@@ -91,7 +91,8 @@ class FuzzLoop(object):
     def __init__(self, target_c, out_dir, daikondir, seeds=None, rng_seed=0,
                  batch_size=200, batches_per_round=3, rounds=10, patience=2,
                  max_len=64, keep_is_param=False, conf_limit=0.0,
-                 daikon_args=(), guidance=True, coverage=True, log=print):
+                 daikon_args=(), guidance=True, coverage=True,
+                 frontend="kvasir", tier=7, log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -110,6 +111,12 @@ class FuzzLoop(object):
         # False gives the opposite ablation: invariants are the only metric,
         # and new coverage alone never keeps an input.
         self.coverage = coverage
+        # "kvasir": source build traced under Valgrind, native coverage build.
+        # "tracer": stripped build, emulation tracer for values AND coverage.
+        if frontend not in ("kvasir", "tracer"):
+            raise ValueError("frontend must be 'kvasir' or 'tracer'")
+        self.frontend = frontend
+        self.tier = tier
         self.daikon_args = list(daikon_args)
         self.log = log
         self.mutator = Mutator(self.rng, max_len=max_len)
@@ -152,6 +159,8 @@ class FuzzLoop(object):
 
     def _execute(self, inputs):
         """[(input, features, samples)] for the inputs that ran cleanly."""
+        if self.frontend == "tracer":
+            return self._execute_tracer(inputs)
         t0 = time.time()
         results, crashes = runner.run_cov(self.cov_exe, inputs, self.work)
         self.stats["seconds_native"] += time.time() - t0
@@ -174,6 +183,29 @@ class FuzzLoop(object):
             feats, consts = results[i]
             self.mutator.add_constants(consts)
             out.append((inputs[i], feats, per_input.get(local, [])))
+        return out
+
+    def _execute_tracer(self, inputs):
+        t0 = time.time()
+        decls, per_input, feats, bad, _ = runner.run_tracer(
+            self.bb_exe, inputs, self.work, tier=self.tier)
+        self.stats["seconds_tracer"] = self.stats.get("seconds_tracer", 0.0) \
+            + time.time() - t0
+        self.stats["tracer_runs"] = self.stats.get("tracer_runs", 0) + 1
+        self.stats["execs"] += len(inputs)
+        if self.decls is None:
+            self.decls = decls
+        bad_ids = set()
+        for i, reason in bad:
+            bad_ids.add(i)
+            self._save_crash(inputs[i], reason.split(":")[0])
+        out = []
+        for i in range(len(inputs)):
+            if i in bad_ids:
+                continue
+            fs, consts = feats.get(i, (frozenset(), []))
+            self.mutator.add_constants(consts)
+            out.append((inputs[i], fs, per_input.get(i, [])))
         return out
 
     def _save_crash(self, data, reason):
@@ -252,6 +284,17 @@ class FuzzLoop(object):
     # -- inference ---------------------------------------------------------
 
     def _write_corpus_trace(self):
+        if self.frontend == "tracer":
+            # The tracer decides each function's arity from the evidence in
+            # ONE run, so batches can declare the same function differently.
+            # Re-trace the whole corpus in a single run: one consistent set of
+            # declarations, and every entry's samples refreshed to match it.
+            decls, per_input, _, _, _ = runner.run_tracer(
+                self.bb_exe, [e.data for e in self.corpus], self.work,
+                tier=self.tier)
+            self.decls = decls
+            for i, e in enumerate(self.corpus):
+                e.samples = per_input.get(i, [])
         header, blocks = self.decls
         decls_path = os.path.join(self.out, "corpus.decls")
         with open(decls_path, "w") as f:
@@ -313,8 +356,12 @@ class FuzzLoop(object):
 
     def run(self):
         self._dirs()
-        self.cov_exe, self.kv_exe = runner.build(self.target_c, self.work)
-        self.ppt_list = runner.write_ppt_list(self.kv_exe, self.work, self.daikondir)
+        if self.frontend == "tracer":
+            self.bb_exe = runner.build_blackbox(self.target_c, self.work)
+        else:
+            self.cov_exe, self.kv_exe = runner.build(self.target_c, self.work)
+            self.ppt_list = runner.write_ppt_list(self.kv_exe, self.work,
+                                                  self.daikondir)
         seeds = self._load_seeds()
         self.log("[+] target  %s" % self.target_c)
         self.log("[+] seeds   %d" % len(seeds))
@@ -410,9 +457,14 @@ class FuzzLoop(object):
         for row in self.round_log:
             L.append("| %(round)d | %(invariants)d | %(refuted)d | %(corpus)d | %(features)d |" % row)
         s = self.stats
-        L += ["", "%d executions; %d Kvasir runs (%.1fs), %d Daikon runs (%.1fs), "
-              "native %.1fs." % (s["execs"], s["kvasir_runs"], s["seconds_kvasir"],
-                                 s["daikon_runs"], s["seconds_daikon"], s["seconds_native"]), ""]
+        if self.frontend == "tracer":
+            cost = "%d tracer runs (%.1fs)" % (s.get("tracer_runs", 0),
+                                               s.get("seconds_tracer", 0.0))
+        else:
+            cost = "%d Kvasir runs (%.1fs), native %.1fs" % (
+                s["kvasir_runs"], s["seconds_kvasir"], s["seconds_native"])
+        L += ["", "Front-end: %s. %d executions; %s; %d Daikon runs (%.1fs)." % (
+            self.frontend, s["execs"], cost, s["daikon_runs"], s["seconds_daikon"]), ""]
 
         L += ["## Refuted (%d)" % len(refuted), "",
               "| ppt | invariant | proposed | refuted | counterexample |", "|---|---|---|---|---|"]

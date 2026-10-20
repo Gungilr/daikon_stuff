@@ -40,11 +40,17 @@ def main(argv=None):
     ap.add_argument("--no-coverage", action="store_true",
                     help="ablation: keep inputs for invariant progress only, so "
                          "coverage steers nothing")
+    ap.add_argument("--frontend", choices=("kvasir", "tracer"), default="kvasir",
+                    help="kvasir: source build traced by Kvasir (default). "
+                         "tracer: STRIPPED build traced by the emulation tracer "
+                         "(scripts/tracer), which also supplies coverage")
+    ap.add_argument("--tier", type=int, default=7,
+                    help="tracer heuristic tier for --frontend tracer (default 7)")
     ap.add_argument("--daikon-arg", action="append", default=[],
                     help="extra argument passed to Daikon (repeatable)")
     args = ap.parse_args(argv)
 
-    problems = runner.check_tools(args.daikon)
+    problems = runner.check_tools(args.daikon, args.frontend)
     if problems:
         for p in problems:
             print("[!] " + p, file=sys.stderr)
@@ -57,7 +63,8 @@ def main(argv=None):
                     patience=args.patience, max_len=args.max_len,
                     keep_is_param=args.keep_is_param, conf_limit=args.conf_limit,
                     daikon_args=args.daikon_arg, guidance=not args.no_guidance,
-                    coverage=not args.no_coverage)
+                    coverage=not args.no_coverage, frontend=args.frontend,
+                    tier=args.tier)
     try:
         loop.run()
     except runner.ToolError as e:

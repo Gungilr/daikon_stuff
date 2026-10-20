@@ -101,6 +101,17 @@ def build_parser():
     # already means stack relocation, and two near-identical flag names with
     # unrelated meanings is a standing trap. Tier selects how much semantic
     # recovery the tracer attempts; layouts selects how many times it runs.
+    fz = p.add_argument_group("fuzzing")
+    fz.add_argument("--fuzz-batch", default=None,
+                    help="Run main once per input in this batch file (u32 LE "
+                         "length + bytes per record), writing each input into "
+                         "the DAIKON-FUZZ-BLOB buffer of a binary built with "
+                         "fuzz/runtime/harness_bb.c. A fuzz_input_begin "
+                         "marker sample separates inputs in the trace.")
+    fz.add_argument("--fuzz-cov-out", default=None,
+                    help="With --fuzz-batch: write one JSON line of edge "
+                         "coverage per input to this file.")
+
     heur = p.add_argument_group("heuristics")
     heur.add_argument("--tier", type=int, default=0, choices=range(0, 10),
                       metavar="0-9",

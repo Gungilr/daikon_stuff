@@ -19,7 +19,8 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = REPO / "scripts"
 
-PURE_MODULES = ["tracer.writer", "tracer.schema", "tracer.log", "tracer"]
+PURE_MODULES = ["tracer.writer", "tracer.schema", "tracer.log", "tracer",
+                "tracer.fuzzinput"]
 IMPURE_MODULES = ["tracer.emulate", "tracer.elfload"]
 
 # Installs a meta_path finder that raises on the binary-analysis libraries,

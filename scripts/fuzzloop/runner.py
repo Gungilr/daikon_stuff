@@ -13,16 +13,19 @@ Every batch runs natively first. Inputs that crash or hang there are set
 aside and never reach Kvasir, so one bad input cannot cost a whole batch of
 traces.
 """
+import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 
 from . import dtrace
 from .mutate import pack_batch
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUNTIME = os.path.join(REPO, "fuzz", "runtime")
+TRACER = os.path.join(REPO, "scripts", "unicorn_dwarf.py")
 
 # Kept in step with the corpus Makefile so a target traces like tests/*.exe.
 # -fwrapv makes signed overflow wrap instead of being undefined, so the
@@ -222,14 +225,24 @@ def run_daikon(decls_path, dtrace_path, workdir, daikondir, conf_limit=None,
     return p.stdout.decode(errors="replace")
 
 
-def check_tools(daikondir):
+def check_tools(daikondir, frontend="kvasir"):
     """[problem] - empty when everything the loop needs is present."""
     problems = []
     if not daikondir:
         return ["DAIKONDIR is not set (or pass --daikon)."]
     if not os.path.isdir(daikondir):
         return ["DAIKONDIR does not exist: %s" % daikondir]
-    if not os.path.exists(os.path.join(daikondir, "fjalar", "valgrind", "inst", "bin", "valgrind")):
+    if frontend == "tracer":
+        try:
+            import unicorn  # noqa: F401
+            import capstone  # noqa: F401
+            import elftools  # noqa: F401
+        except ImportError as e:
+            problems.append("the tracer front-end needs unicorn, capstone and "
+                            "pyelftools: %s" % e)
+        if not shutil.which("strip"):
+            problems.append("strip is not on PATH")
+    elif not os.path.exists(os.path.join(daikondir, "fjalar", "valgrind", "inst", "bin", "valgrind")):
         problems.append("Kvasir is not built: make -C %s kvasir "
                         "(needs binutils-dev for bfd.h)" % daikondir)
     if not shutil.which("java"):
@@ -239,3 +252,73 @@ def check_tools(daikondir):
         problems.append("no daikon.jar or java/ under %s" % daikondir)
     return problems
 
+
+
+# --- the black-box front-end: the emulation tracer on a stripped binary ------
+#
+# Nothing below reads source, DWARF or symbols at trace time. The target is
+# compiled once with fuzz/runtime/harness_bb.c and stripped, and from then on
+# the stripped file is all the loop touches: the tracer finds the functions,
+# finds the input buffer by its magic string, reports the values Daikon needs
+# AND the edge coverage the fuzzer needs, from one emulation per input.
+
+def build_blackbox(target_c, workdir, cc=None):
+    """Path of a stripped (--strip-all) build of the target."""
+    cc = cc or os.environ.get("CC", "gcc")
+    os.makedirs(workdir, exist_ok=True)
+    name = os.path.splitext(os.path.basename(target_c))[0]
+    full = os.path.join(workdir, name + ".bb")
+    stripped = os.path.join(workdir, name + ".stripped")
+    # -Wno-unterminated-string-initialization: the 16-byte magic has no NUL,
+    # deliberately; the tracer matches exactly 16 bytes.
+    _run([cc, "-O0", "-no-pie", "-fno-stack-protector", "-fwrapv",
+          "-Wno-unterminated-string-initialization",
+          target_c, os.path.join(RUNTIME, "harness_bb.c"), "-o", full])
+    _run(["strip", "--strip-all", "-o", stripped, full])
+    return stripped
+
+
+def run_tracer(binary, inputs, workdir, tier=7, extra_args=(), timeout=1800.0):
+    """(decls, {i: [Sample]}, {i: (features, constants)}, [(i, status)],
+    start_func).
+
+    One tracer process for the whole batch; each input still runs in a
+    fresh emulator. Inputs whose emulation did not finish cleanly are
+    reported as crashes: an emulator error, or the instruction limit (the
+    emulated equivalent of a hang).
+    """
+    batch_path = os.path.join(workdir, "bb.batch")
+    dt_path = os.path.join(workdir, "bb.dtrace")
+    cov_path = os.path.join(workdir, "bb.cov")
+    with open(batch_path, "wb") as f:
+        f.write(pack_batch(inputs))
+    for p in (dt_path, cov_path):
+        if os.path.exists(p):
+            os.remove(p)
+    try:
+        _run([sys.executable, TRACER, binary, "-o", dt_path, "--tier", str(tier),
+              "--scan-prologues", "--fuzz-batch", batch_path,
+              "--fuzz-cov-out", cov_path] + list(extra_args),
+             cwd=workdir, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ToolError("tracer timed out on a batch of %d inputs" % len(inputs))
+    with open(dt_path, errors="replace") as f:
+        text = f.read()
+    decls = dtrace.parse_decls(text)
+    per_input = dtrace.split_by_input(dtrace.parse_dtrace(text))
+    feats, bad, start = {}, [], None
+    with open(cov_path) as f:
+        for line in f:
+            rec = json.loads(line)
+            start = rec.get("start_func") or start
+            if rec["status"] != "ok":
+                bad.append((rec["id"], rec["status"]))
+            feats[rec["id"]] = (frozenset(rec["edges"]), rec.get("consts", []))
+    if start:
+        drop = "..%s()" % start
+        per_input = {i: [s for s in ss if dtrace.func_of(s.ppt) != drop]
+                     for i, ss in per_input.items()}
+        header, blocks = decls
+        decls = (header, {p: b for p, b in blocks.items()
+                          if dtrace.func_of(p) != drop})
+    return decls, per_input, feats, bad, start
