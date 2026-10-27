@@ -99,7 +99,8 @@ def run_afl(target, outdir, seed, budget, bins):
             with open(os.path.join(seeds_dir, "seed%02d" % i), "wb") as g:
                 g.write(s)
     env = dict(os.environ, AFL_SKIP_CPUFREQ="1", AFL_NO_UI="1", AFL_NO_AFFINITY="1",
-               AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES="1", AFL_SKIP_BIN_CHECK="0")
+               AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES="1")
+    env.pop("AFL_SKIP_BIN_CHECK", None)   # AFL++ treats it as set at ANY value
     with open(outdir + ".log", "w") as log:
         subprocess.run([os.path.join(AFL, "afl-fuzz"), "-i", seeds_dir, "-o", outdir,
                         # 2000+: generous per-input limit (three runs share
@@ -172,8 +173,16 @@ def score_run(tool, target, outdir, oracle, bugs, workdir):
         h = json.load(open(os.path.join(outdir, "history.json")))
         kept = [(bytes.fromhex(e["input"]), e["time"]) for e in h["corpus"]]
         kept += [(bytes.fromhex(b["input"]), b["time"]) for b in h["bugs"]]
-        for (data, t), ids in zip(kept, triggers(oracle, [d for d, _ in kept], workdir)):
+        kept_ids = triggers(oracle, [d for d, _ in kept], workdir)
+        for (data, t), ids in zip(kept, kept_ids):
             note(trig, ids, t)
+        # Logic bugs, flagged live: when the loop kept a triggering input, that
+        # input broke a rule that was current at the time, in the bug's own
+        # function. (The rule may also be broken by correct inputs, so this
+        # flags a suspect, not a proof.)
+        for e, ids in zip(h["corpus"], kept_ids):
+            fns = {k[0].split("(")[0].lstrip(".") for k in e.get("violates", [])}
+            note(rep, [b for b in ids if bugs.get(b, (None, None))[1] in fns], e["time"])
         sb = [(bytes.fromhex(b["input"]), b["time"]) for b in h["bugs"]]
         for (data, t), ids in zip(sb, triggers(oracle, [d for d, _ in sb], workdir)):
             note(rep, ids, t)

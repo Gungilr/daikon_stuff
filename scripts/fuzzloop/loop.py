@@ -47,13 +47,14 @@ def _sha(data):
 
 
 class Entry(object):
-    __slots__ = ("data", "samples", "round", "reason", "wins", "time")
+    __slots__ = ("data", "samples", "round", "reason", "wins", "time", "violates")
 
     def __init__(self, data, samples, round_, reason, time_=0.0):
         self.data, self.samples = data, samples
         self.round, self.reason = round_, reason
         self.wins = 0       # invariants for which this is the closest attacker
         self.time = time_   # seconds since the run started
+        self.violates = []  # live rules this input broke when it was kept
 
 
 class History(object):
@@ -328,6 +329,7 @@ class FuzzLoop(object):
 
         idx = len(self.corpus)
         entry = Entry(data, samples, round_, ", ".join(reasons), self._elapsed())
+        entry.violates = sorted(k for k, d in dists.items() if d == 0)
         self.corpus.append(entry)
         self.seen_features |= feats
         with open(os.path.join(self.out, "corpus", _sha(data) + ".bin"), "wb") as f:
@@ -576,7 +578,8 @@ class FuzzLoop(object):
             "mode": {"learn_once": self.learn_once, "guidance": self.guidance,
                      "coverage": self.coverage, "time_limit": self.time_limit},
             "corpus": [{"input": e.data.hex(), "round": e.round, "time": e.time,
-                        "reason": e.reason} for e in self.corpus],
+                        "reason": e.reason, "violates": [list(k) for k in e.violates]}
+                       for e in self.corpus],
             "invariants": sorted(self.history.inv.values(),
                                  key=lambda r: (r["ppt"], r["first_round"], r["text"])),
             "disagreements": self._disagreements(),
