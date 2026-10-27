@@ -92,6 +92,12 @@ int main(int argc, char **argv) {
          * the batch buffer would make every traced pointer to the input
          * dump the REST OF THE BATCH - quadratic trace size, measured at
          * 110 MB for 1000 inputs. */
+#ifdef FUZZ_SAN
+        /* The sanitizer build: everything ASan/UBSan print after this line
+         * belongs to this record (scripts/fuzzloop/bugs.py). */
+        fprintf(stderr, "@@FUZZ-INPUT %u\n", id);
+        fflush(stderr);
+#endif
         uint8_t *rec = malloc(n ? n : 1);
         memcpy(rec, batch + pos, n);
         fuzz_input_begin((int)id);

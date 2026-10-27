@@ -229,6 +229,51 @@ return`) gone in round 1. The control holds: `clamp`'s `lo <= return` and
 `hi >= return` survive. On `buffer.c`, `parse_digits: return >= 0` falls to a
 run of fifteen `9`s, and `n >= 1` falls to the empty input.
 
+## 3b. The bug checker (source mode)
+
+Daikon can only flag a property it has already proposed. In a single-seed
+run it never proposed `abs_diff: return >= 0`, so the 5 inputs that overflowed
+`abs_diff` went unreported. The research behind the fix is in
+[../reports/Detecting overflows in the fuzz loop.md](../reports/Detecting%20overflows%20in%20the%20fuzz%20loop.md).
+
+Every batch now also runs on a **third build** of the target:
+`-O0 -g -fsanitize=address,undefined -fsanitize-recover=undefined`, compiled
+with `harness.c -DFUZZ_SAN`. Any ASan or UBSan report becomes a bug,
+independent of the invariants.
+
+- **No `-fwrapv`.** With `-fwrapv`, gcc silently drops UBSan's
+  signed-overflow check. Verified with gcc 13.3: the overflow prints a wrong
+  answer and exits 0. The traced and coverage builds keep `-fwrapv`, so Kvasir
+  still records the wrapped value.
+- **Attribution.** The harness writes `@@FUZZ-INPUT <id>` to stderr before
+  each record, and `fuzzloop/bugs.py` assigns every report to the input
+  before it.
+  - UBSan reports are recoverable, so the batch continues.
+  - An ASan report aborts the process. The runner records the bug and
+    re-runs the batch from the next input.
+- **Deduplication.** A bug is `(kind, file:line:col)`. Its first input is
+  saved to `bugs/` and forced into the corpus, and `hits` counts every input
+  that reached it.
+- **Reporting.** Each new bug is logged as `[BUG]` the moment it appears, and
+  listed in `summary.md` and `history.json`. A round that finds a new bug
+  does not count as quiet.
+- **Opt-out:** `--no-bug-check`. Not available with `--frontend tracer`,
+  because it needs source.
+
+Results (seed 0):
+
+| target | start | bug | location | round | hits |
+|---|---|---|---|---|---|
+| arith.c | 1 seed | signed overflow, `b - a` in `abs_diff` | `arith.c:35:26` | 1 | 60 |
+| buffer.c | 12 seeds | signed overflow, `v * 10` in `parse_digits` | `buffer.c:41:15` | 1 | 12 |
+
+In the single-seed `arith` run the loop never proposed `return >= 0`, yet
+the checker reports the overflow in round 1. The *other* subtraction in
+`abs_diff`, `a - b` (which overflows when `a` is near INT_MAX and `b` is very
+negative), was never triggered in that run. The fuzzer has no guidance
+toward it. Overflow "headroom" guidance (step 4 of the report's plan) is what
+would aim at it.
+
 ## 4. Limits, stated plainly
 
 - **Branch distance is local.** For `parse_digits`, `return >= 0` is

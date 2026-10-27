@@ -87,11 +87,15 @@ Use exactly these four sections, in this order.
 One table first, before any prose. Use one row per run, or per mode when
 comparing. Columns, at minimum:
 
-| target | front-end | seed | rounds | rules proposed (round 0) | refuted | survived | disagreements | time |
+| target | front-end | seed | rounds | rules proposed (round 0) | refuted | survived | bugs | disagreements | time |
 
 When comparing modes, add a "false rules left standing" column: rules the
 *other* mode refuted on the same seed. Bold the cells that differ between
-modes. If the user asked about specific bugs, add a second short table of
+modes. Always add a second table of the **bugs the sanitizer build found** (kind,
+location, round, hits, first input), even if it is empty. These are reported
+whether or not any rule predicted them, so say which of them a refuted rule
+also caught and which only the checker caught. If the user asked about
+specific bugs, add a short table of
 those bugs: function, rule, refuted yes/no, round, counterexample input.
 
 ### Description

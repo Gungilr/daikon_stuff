@@ -24,7 +24,8 @@ def frontend(h):
 def seconds(h):
     s = h["stats"]
     return (s.get("seconds_tracer", 0) + s.get("seconds_kvasir", 0)
-            + s.get("seconds_native", 0) + s.get("seconds_daikon", 0))
+            + s.get("seconds_native", 0) + s.get("seconds_daikon", 0)
+            + s.get("seconds_san", 0))
 
 
 def refuted(h):
@@ -36,10 +37,10 @@ def alive(h):
 
 
 def results_row(run, h):
-    return "| %s | %s | %s | %d | %d | %d | %d | %d | %.0fs |" % (
+    return "| %s | %s | %s | %d | %d | %d | %d | %d | %d | %.0fs |" % (
         os.path.basename(h["target"]), frontend(h), os.path.basename(run.rstrip("/")),
         len(h["rounds"]) - 1, h["rounds"][0]["invariants"], len(refuted(h)),
-        len(alive(h)), len(h["disagreements"]), seconds(h))
+        len(alive(h)), len(h.get("bugs", [])), len(h["disagreements"]), seconds(h))
 
 
 def show_input(x):
@@ -78,6 +79,12 @@ def detail(run, h):
           "%.1fs Daikon over %d runs, %.1fs native"
           % (execs, tool, 1000.0 * tool / execs if execs else 0,
              s["seconds_daikon"], s["daikon_runs"], s.get("seconds_native", 0)))
+    bl = h.get("bugs", [])
+    print("\nbugs found by the sanitizer build (%d):" % len(bl))
+    for b in bl:
+        print("  r%-2d %-26s %-18s hits %-4d <- %s" % (
+            b["round"], b["kind"], b["location"], b["hits"], show_input(b["input"])))
+        print("        %s" % b["message"])
     print("crashes: %d   disagreements: %d   final corpus: %d"
           % (len(h["crashes"]), len(h["disagreements"]), h["corpus_size"]))
     print("\nrefuted (%d):" % len(refuted(h)))
@@ -120,8 +127,8 @@ def main(argv=None):
         return 0
     hs = [(r, load(r)) for r in args.runs]
     print("| target | front-end | run | rounds | rules proposed (round 0) | refuted "
-          "| survived | disagreements | time |")
-    print("|---|---|---|---|---|---|---|---|---|")
+          "| survived | bugs | disagreements | time |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for r, h in hs:
         print(results_row(r, h))
     for r, h in hs:

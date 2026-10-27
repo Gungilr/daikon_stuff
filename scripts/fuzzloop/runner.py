@@ -20,7 +20,7 @@ import signal
 import subprocess
 import sys
 
-from . import dtrace
+from . import bugs, dtrace
 from .mutate import pack_batch
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -135,6 +135,66 @@ def _describe_exit(rc):
         except ValueError:
             return "signal %d" % -rc
     return "exit %d" % rc
+
+
+# --- the bug checker: a sanitizer build -------------------------------------
+
+# Deliberately WITHOUT -fwrapv: with it, gcc drops the signed-overflow check.
+# UBSan is recoverable so one input can report several problems and the batch
+# continues; ASan aborts, and run_san restarts after the culprit.
+SAN_CFLAGS = ["-O0", "-g", "-fsanitize=address,undefined",
+              "-fsanitize-recover=undefined", "-fno-omit-frame-pointer"]
+SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=0:abort_on_error=0:symbolize=1",
+           "UBSAN_OPTIONS": "print_stacktrace=0:halt_on_error=0"}
+
+
+def build_san(target_c, workdir, cc=None):
+    """Path of the sanitizer build of the target, with the batch harness."""
+    cc = cc or os.environ.get("CC", "gcc")
+    os.makedirs(workdir, exist_ok=True)
+    name = os.path.splitext(os.path.basename(target_c))[0]
+    exe = os.path.join(workdir, name + ".san")
+    _run([cc] + SAN_CFLAGS + ["-DFUZZ_SAN", target_c,
+                              os.path.join(RUNTIME, "harness.c"), "-o", exe])
+    return exe
+
+
+def run_san(san_exe, inputs, workdir, own_sources=(), timeout=60.0):
+    """{input index: [bugs.Bug]} for every input that triggered a report.
+
+    An input that kills the process (an ASan report, or a signal) is the last
+    one to have printed its marker. Its bugs are recorded and the batch is
+    re-run from the next input, as run_cov does for crashes.
+    """
+    found = {}
+    pending = list(range(len(inputs)))
+    batch_path = os.path.join(workdir, "san.batch")
+    env = dict(os.environ, **SAN_ENV)
+    while pending:
+        with open(batch_path, "wb") as f:
+            f.write(pack_batch([inputs[i] for i in pending]))
+        try:
+            p = subprocess.run([san_exe, batch_path], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, env=env, timeout=timeout)
+            err, rc = p.stderr.decode(errors="replace"), p.returncode
+        except subprocess.TimeoutExpired as e:
+            err = (e.stderr or b"").decode(errors="replace")
+            rc = "timeout"
+        per, last = bugs.parse_stderr(err, own_sources)
+        for local, bs in per.items():
+            found.setdefault(pending[local], []).extend(bs)
+        if rc == 0:
+            break
+        if last is None:
+            raise ToolError("sanitizer run failed (%s) before any input:\n%s"
+                            % (rc, err[-2000:]))
+        if last not in per:
+            # Died without a parseable report: still a bug, by its exit status.
+            kind = "timeout" if rc == "timeout" else _describe_exit(rc)
+            found.setdefault(pending[last], []).append(
+                bugs.Bug("signal", kind, "?", "process ended: %s" % kind))
+        pending = pending[last + 1:]
+    return found
 
 
 # --- Kvasir -----------------------------------------------------------------

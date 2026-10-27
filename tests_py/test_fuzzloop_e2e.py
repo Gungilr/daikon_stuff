@@ -56,3 +56,10 @@ def test_fuzzer_and_daikon_agree(arith):
     # Daikon falsifies on one counterexample, so anything the fuzzer saw
     # violated must be gone from Daikon's report.
     assert arith["disagreements"] == []
+
+
+def test_bug_checker_reports_the_overflow(arith):
+    # Independent of whether Daikon ever proposed `return >= 0`.
+    overflows = [b for b in arith["bugs"] if b["kind"] == "signed integer overflow"]
+    assert overflows and all(b["location"].startswith("arith.c:") for b in overflows)
+    assert all(b["hits"] >= 1 and b["input"] for b in overflows)

@@ -46,6 +46,9 @@ def main(argv=None):
                          "(scripts/tracer), which also supplies coverage")
     ap.add_argument("--tier", type=int, default=7,
                     help="tracer heuristic tier for --frontend tracer (default 7)")
+    ap.add_argument("--no-bug-check", action="store_true",
+                    help="source mode: do not run every input through the "
+                         "ASan+UBSan build (built without -fwrapv)")
     ap.add_argument("--daikon-arg", action="append", default=[],
                     help="extra argument passed to Daikon (repeatable)")
     args = ap.parse_args(argv)
@@ -64,7 +67,7 @@ def main(argv=None):
                     keep_is_param=args.keep_is_param, conf_limit=args.conf_limit,
                     daikon_args=args.daikon_arg, guidance=not args.no_guidance,
                     coverage=not args.no_coverage, frontend=args.frontend,
-                    tier=args.tier)
+                    tier=args.tier, bug_check=not args.no_bug_check)
     try:
         loop.run()
     except runner.ToolError as e:

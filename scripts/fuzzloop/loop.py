@@ -100,7 +100,7 @@ class FuzzLoop(object):
                  batch_size=200, batches_per_round=3, rounds=10, patience=2,
                  max_len=64, keep_is_param=False, conf_limit=0.0,
                  daikon_args=(), guidance=True, coverage=True,
-                 frontend="kvasir", tier=7, log=print):
+                 frontend="kvasir", tier=7, bug_check=True, log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -124,6 +124,11 @@ class FuzzLoop(object):
         if frontend not in ("kvasir", "tracer"):
             raise ValueError("frontend must be 'kvasir' or 'tracer'")
         self.frontend = frontend
+        # The bug checker needs source (a sanitizer build), so it is
+        # source-mode only.
+        self.bug_check = bug_check and frontend == "kvasir"
+        self.bugs = {}            # (kind, location) -> record
+        self._bug_inputs = set()  # inputs that found a NEW bug this batch
         self.tier = tier
         self.daikon_args = list(daikon_args)
         self.log = log
@@ -161,7 +166,7 @@ class FuzzLoop(object):
                 for _ in range(16)]
 
     def _dirs(self):
-        for d in ("work", "corpus", "crashes", "rounds"):
+        for d in ("work", "corpus", "crashes", "rounds", "bugs"):
             os.makedirs(os.path.join(self.out, d), exist_ok=True)
 
     # -- execution ---------------------------------------------------------
@@ -176,6 +181,13 @@ class FuzzLoop(object):
         self.stats["execs"] += len(inputs)
         for i, reason in crashes:
             self._save_crash(inputs[i], reason)
+        if self.bug_check:
+            t0 = time.time()
+            found = runner.run_san(self.san_exe, inputs, self.work,
+                                   own_sources=(os.path.basename(self.target_c),))
+            self.stats["seconds_san"] = self.stats.get("seconds_san", 0.0) \
+                + time.time() - t0
+            self._record_bugs(inputs, found)
         ok = sorted(results)
         if not ok:
             return []
@@ -217,6 +229,33 @@ class FuzzLoop(object):
             out.append((inputs[i], fs, per_input.get(i, [])))
         return out
 
+    def _record_bugs(self, inputs, found):
+        """Log and save each bug the first time it is seen.
+
+        A bug is (kind, source location): every input that overflows the same
+        subtraction is one bug, counted in `hits`. The first input is kept as
+        the reproducer, and it is forced into the corpus so Daikon sees the
+        state too.
+        """
+        self._bug_inputs = set()
+        for i, bs in found.items():
+            for b in bs:
+                rec = self.bugs.get(b.key)
+                if rec is None:
+                    name = "%s.%s.bin" % (_sha(inputs[i]), b.kind.replace(" ", "_"))
+                    with open(os.path.join(self.out, "bugs", name), "wb") as f:
+                        f.write(inputs[i])
+                    rec = dict(b.as_dict(), input=inputs[i].hex(), file=name,
+                               round=self._round, hits=0)
+                    self.bugs[b.key] = rec
+                    self._bug_inputs.add(inputs[i])
+                    self.log("    [BUG] %s at %s%s <- %s" % (
+                        b.kind, b.location,
+                        " in %s()" % b.function if b.function else "",
+                        inputs[i].hex() or "(empty input)"))
+                    self.log("          %s" % b.message)
+                rec["hits"] += 1
+
     def _save_crash(self, data, reason):
         name = "%s.%s.bin" % (_sha(data), reason.replace(" ", "_"))
         path = os.path.join(self.out, "crashes", name)
@@ -256,6 +295,8 @@ class FuzzLoop(object):
         reasons = []
         if force:
             reasons.append("seed")
+        if data in self._bug_inputs:
+            reasons.append("bug")
         if new_feats and self.coverage:
             reasons.append("coverage+%d" % len(new_feats))
         if violations and self.guidance:
@@ -264,7 +305,8 @@ class FuzzLoop(object):
             reasons.append("closer to %d" % len(progress))
         if not reasons:
             return None
-        for kind, hit in (("coverage", new_feats), ("violation", violations),
+        for kind, hit in (("bug", data in self._bug_inputs),
+                          ("coverage", new_feats), ("violation", violations),
                           ("closer", progress and not force)):
             if hit and not force:
                 self.keep_counts[kind] = self.keep_counts.get(kind, 0) + 1
@@ -375,6 +417,9 @@ class FuzzLoop(object):
             self.cov_exe, self.kv_exe = runner.build(self.target_c, self.work)
             self.ppt_list = runner.write_ppt_list(self.kv_exe, self.work,
                                                   self.daikondir)
+            if self.bug_check:
+                self.san_exe = runner.build_san(self.target_c, self.work)
+        self._round = 0
         seeds = self._load_seeds()
         self.log("[+] target  %s" % self.target_c)
         self.log("[+] seeds   %d" % len(seeds))
@@ -402,6 +447,8 @@ class FuzzLoop(object):
             dist_before = {k: rec["min_distance"] for k, rec in self.history.inv.items()
                            if rec["refuted_round"] is None}
             self.keep_counts = {}
+            self._round = r
+            bugs_before = len(self.bugs)
             added = 0
             for _ in range(self.batches_per_round):
                 cands = []
@@ -444,10 +491,12 @@ class FuzzLoop(object):
             for ppt, text, before, after in sorted(closer, key=lambda c: c[3])[:8]:
                 self.log("      closer   %-28s %-30s distance %s -> %g" % (
                     ppt, text, "?" if before is None else "%g" % before, after))
-            self.log("      kept: %s; executions %d; dictionary %d; crashes +%d" % (
+            self.log("      kept: %s; executions %d; dictionary %d; crashes +%d; "
+                     "bugs +%d" % (
                 ", ".join("%s %d" % kv for kv in sorted(self.keep_counts.items()))
                 or "nothing", self.stats["execs"] - execs_before,
-                len(self.mutator.dictionary), len(self.crashes) - crashes_before))
+                len(self.mutator.dictionary), len(self.crashes) - crashes_before,
+                len(self.bugs) - bugs_before))
             self.round_log.append({
                 "round": r, "invariants": n_inv, "refuted": len(refuted),
                 "proposed": len(proposed), "corpus": len(self.corpus),
@@ -456,10 +505,12 @@ class FuzzLoop(object):
                 "kept": dict(self.keep_counts),
                 "dictionary": len(self.mutator.dictionary),
                 "crashes": len(self.crashes) - crashes_before,
+                "bugs": len(self.bugs) - bugs_before,
                 "refuted_list": [[x["ppt"], x["text"], x["violated_by"]] for x in refuted],
                 "proposed_list": [[x["ppt"], x["text"]] for x in proposed],
                 "closer_list": [list(c) for c in closer]})
-            quiet = quiet + 1 if (not refuted and (new_feats == 0 or not self.coverage)) else 0
+            quiet = quiet + 1 if (not refuted and len(self.bugs) == bugs_before
+                                  and (new_feats == 0 or not self.coverage)) else 0
             if quiet >= self.patience:
                 self.log("[+] fixed point: %d quiet round(s)" % quiet)
                 break
@@ -490,6 +541,7 @@ class FuzzLoop(object):
             "stats": self.stats,
             "corpus_size": len(self.corpus),
             "crashes": self.crashes,
+            "bugs": sorted(self.bugs.values(), key=lambda b: (b["round"], b["location"])),
             "invariants": sorted(self.history.inv.values(),
                                  key=lambda r: (r["ppt"], r["first_round"], r["text"])),
             "disagreements": self._disagreements(),
@@ -530,6 +582,20 @@ class FuzzLoop(object):
                 r["ppt"], r["text"], r["first_round"],
                 "n/a" if md is None else ("%g" % md)))
 
+        if self.bug_check:
+            L += ["", "## Bugs found by the sanitizer build (%d)" % len(self.bugs), "",
+                  "Reported by ASan/UBSan on a build without -fwrapv, whether or not "
+                  "any Daikon rule predicted them. One row per (kind, location); "
+                  "`hits` counts every input that triggered it.", ""]
+            if self.bugs:
+                L += ["| kind | location | round | hits | first input | message |",
+                      "|---|---|---|---|---|---|"]
+                for b in sorted(self.bugs.values(), key=lambda b: (b["round"], b["location"])):
+                    L.append("| %s | `%s` | %d | %d | %s | %s |" % (
+                        b["kind"], b["location"], b["round"], b["hits"],
+                        _show_input(b["input"]), b["message"].replace("|", "\\|")))
+            else:
+                L.append("None.")
         if self.crashes:
             L += ["", "## Crashes (%d)" % len(self.crashes), ""]
             for c in self.crashes:
