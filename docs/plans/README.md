@@ -20,6 +20,7 @@ is the research output.
 | [../EVALUATION-KVASIR-SUITE.md](../EVALUATION-KVASIR-SUITE.md) | — | Same tool on Daikon's own test suite | **13/4/6** — globals are 80% of it |
 | [phase9.md](phase9.md) | 8, 9 | Global variables; floating point | **complete** — suite F1 6% → **19%** |
 | [phase10.md](phase10.md) | — | Globals as deref roots; struct globals | **B landed (opt-in), C measured harmful**; A/D/E not started |
+| [../BENCHMARK.md](../BENCHMARK.md) | — | Loop vs. learn-once vs. AFL++ on 10 planted bugs | **measured**: memory/UB 21/21 for all; logic bugs flagged only by Daikon modes, at 2.4% precision |
 | [../VERIFICATION.md](../VERIFICATION.md) | — | What can be formally verified, and what cannot | **reviewed** — 1 defect found |
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
 | [../FUZZ-LOOP.md](../FUZZ-LOOP.md) | — | Daikon + fuzzer loop; Kvasir front-end, and the tracer on stripped binaries (`--frontend tracer`) | **working** — tracer input mechanism via `--fuzz-batch` |
