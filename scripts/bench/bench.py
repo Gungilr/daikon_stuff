@@ -208,6 +208,8 @@ def main(argv=None):
     ap.add_argument("--tools", default=",".join(TOOLS))
     ap.add_argument("--out", default=os.path.join(REPO, "bench-out"))
     ap.add_argument("--score-only", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip runs that already finished (they leave a .done file)")
     args = ap.parse_args(argv)
     targets, tools = args.targets.split(","), args.tools.split(",")
     os.environ.setdefault("DAIKONDIR", os.path.join(REPO, "daikon"))
@@ -216,11 +218,14 @@ def main(argv=None):
     if "afl" in tools and not args.score_only:
         for t in targets:
             afl_bins[t] = build_afl(t, os.path.join(args.out, "_build", t))
+    os.makedirs(args.out, exist_ok=True)
     jobs = [(t, tool, s) for t in targets for tool in tools for s in range(args.seeds)]
     if not args.score_only:
         def go(job):
             t, tool, s = job
             od = os.path.join(args.out, t, tool, "seed%d" % s)
+            if args.resume and os.path.exists(od + ".done"):
+                return "%-7s %-10s seed %d  already done" % (t, tool, s)
             shutil.rmtree(od, ignore_errors=True)
             os.makedirs(os.path.dirname(od), exist_ok=True)
             t0 = time.time()
@@ -228,6 +233,7 @@ def main(argv=None):
                 run_afl(t, od, s, args.budget, afl_bins[t])
             else:
                 run_loop(t, od, s, args.budget, tool == "learn-once")
+            open(od + ".done", "w").close()
             return "%-7s %-10s seed %d  %.0fs" % (t, tool, s, time.time() - t0)
         with cf.ThreadPoolExecutor(args.jobs) as ex:
             for line in ex.map(go, jobs):
