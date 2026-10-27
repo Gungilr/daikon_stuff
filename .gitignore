@@ -2,6 +2,7 @@
 daikon/
 unicorn-2.0.1/
 fjalar/
+AFLplusplus/
 
 # Virtualenv (~100 MB)
 venv/
@@ -30,3 +31,5 @@ fuzz-out/
 
 # NOTE: tests_py/golden/*.dtrace is deliberately NOT ignored. Those are the
 # byte-identity baselines every tier is measured against.
+#   bench-out/     scripts/bench/bench.py runs and scores
+bench-out/

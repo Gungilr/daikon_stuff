@@ -46,7 +46,7 @@ def test_reports_before_any_marker_are_ignored():
 
 
 @pytest.mark.e2e
-def test_sanitizer_build_finds_both_bugs_and_survives_an_abort(tmp_path):
+def test_sanitizer_build_finds_both_bugs_and_keeps_going(tmp_path):
     if not shutil.which("gcc"):
         pytest.skip("needs gcc")
     from fuzzloop import runner
@@ -54,12 +54,24 @@ def test_sanitizer_build_finds_both_bugs_and_survives_an_abort(tmp_path):
                            str(tmp_path))
     inputs = [b"\x01", b"\x07", b"\x09", b"\x02", b"\x07"]
     found = runner.run_san(exe, inputs, str(tmp_path), own_sources=("heap_bug.c",))
-    assert sorted(found) == [1, 2, 4]           # 0 and 3 are clean
+    # Recover mode: the heap overflow in input 1 does not stop the batch, so
+    # input 2's overflow is still found. Input 4 repeats input 1's bug at the
+    # same location, and both runtimes print each location once per process.
+    assert sorted(found) == [1, 2]
     assert found[1][0].kind == "heap-buffer-overflow"
     assert found[1][0].function == "write_at"
     assert found[2][0].kind == "signed integer overflow"
-    # input 4 only ran because the batch restarted after input 1's abort
-    assert found[4][0].kind == "heap-buffer-overflow"
+
+
+@pytest.mark.e2e
+def test_a_fatal_signal_costs_one_input_not_the_batch(tmp_path):
+    from fuzzloop import runner
+    exe = runner.build_san(os.path.join(REPO, "fuzz", "targets", "stats.c"),
+                           str(tmp_path))
+    inputs = [b"\x00", bytes([3, 1, 2, 3]), b"\x00"]   # n == 0 divides by zero
+    found = runner.run_san(exe, inputs, str(tmp_path), own_sources=("stats.c",))
+    assert found[0][0].kind == "division by zero"
+    assert 1 not in found
 
 
 @pytest.mark.e2e

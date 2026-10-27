@@ -1,0 +1,7 @@
+# stack.c seeds: balanced push/pop sequences that never under- or overflow.
+str: ua
+str: uaub
+str: uaubo
+str: uapo
+str: uaubucoo
+str: uxp

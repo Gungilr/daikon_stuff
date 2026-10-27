@@ -71,6 +71,27 @@ FUZZ_INLINE size_t fuzz_take_bytes(fuzz_cursor *c, uint8_t *out, size_t cap) {
     return n;
 }
 
+/* Ground truth for benchmarking (scripts/bench). FUZZ_BUG marks a planted
+ * bug: in the scoring build (-DFUZZ_ORACLE) it prints `@@BUG <id>` when the
+ * condition holds, i.e. when the input triggers that bug. In every build a
+ * fuzzer runs, it compiles to nothing, so no tool can see it. */
+/* FUZZ_BUG_FATAL marks a memory bug. The oracle build has no memory
+ * protection, so it abandons the input as soon as the bug is recorded rather
+ * than let the overrun corrupt its own stack (packet.c's 255-byte copy into
+ * a 16-byte buffer otherwise overwrites the loop counter and never ends). */
+#ifdef FUZZ_ORACLE
+#include <stdio.h>
+void fuzz_oracle_abandon(void);
+#define FUZZ_BUG(id, cond) \
+    do { if (cond) fprintf(stderr, "@@BUG %s %s\n", id, __func__); } while (0)
+#define FUZZ_BUG_FATAL(id, cond) \
+    do { if (cond) { fprintf(stderr, "@@BUG %s %s\n", id, __func__); \
+                     fuzz_oracle_abandon(); } } while (0)
+#else
+#define FUZZ_BUG(id, cond) ((void)0)
+#define FUZZ_BUG_FATAL(id, cond) ((void)0)
+#endif
+
 void fuzz_target(const uint8_t *data, size_t size);
 
 #endif

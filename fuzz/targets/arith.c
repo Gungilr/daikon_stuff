@@ -16,7 +16,14 @@
  *   clamp      `lo <= return` and `return <= hi` are true (fuzz_target only
  *              calls it with lo <= hi), so they must survive. It is the
  *              control: a loop that refutes everything is broken.
+ *
+ * Planted bugs (benchmark ground truth, see scripts/bench):
+ *   abs_diff_a_minus_b  (UB)    a - b overflows when a > b and they are far apart
+ *   abs_diff_b_minus_a  (UB)    b - a overflows the same way when a <= b
+ *   lookup_magic        (logic) returns -1 for one key; documented as 0..255
  */
+#include <limits.h>
+
 #include "../runtime/fuzz.h"
 
 int classify(int x) {
@@ -32,10 +39,13 @@ int classify(int x) {
 int abs_diff(int a, int b) {
     /* Deliberately written the naive way. -fwrapv in the build makes the
      * overflow wrap deterministically instead of being undefined. */
+    FUZZ_BUG("abs_diff_a_minus_b", a > b && (long long)a - b > INT_MAX);
+    FUZZ_BUG("abs_diff_b_minus_a", a <= b && (long long)b - a > INT_MAX);
     return a > b ? a - b : b - a;
 }
 
 int lookup(int key) {
+    FUZZ_BUG("lookup_magic", key == 0x5eed1337);   /* logic: documented 0..255 */
     if (key == 0x5eed1337)
         return -1;
     return key & 0xff;

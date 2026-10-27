@@ -47,12 +47,13 @@ def _sha(data):
 
 
 class Entry(object):
-    __slots__ = ("data", "samples", "round", "reason", "wins")
+    __slots__ = ("data", "samples", "round", "reason", "wins", "time")
 
-    def __init__(self, data, samples, round_, reason):
+    def __init__(self, data, samples, round_, reason, time_=0.0):
         self.data, self.samples = data, samples
         self.round, self.reason = round_, reason
         self.wins = 0       # invariants for which this is the closest attacker
+        self.time = time_   # seconds since the run started
 
 
 class History(object):
@@ -61,7 +62,7 @@ class History(object):
     def __init__(self):
         self.inv = {}       # (ppt, text) -> record
 
-    def observe(self, round_, report):
+    def observe(self, round_, report, now=None):
         present = set()
         for ppt, texts in report.items():
             for t in texts:
@@ -80,6 +81,7 @@ class History(object):
         for key, rec in self.inv.items():
             if key not in present and rec["refuted_round"] is None:
                 rec["refuted_round"] = round_
+                rec["refuted_time"] = now
                 refuted.append(rec)
         return refuted
 
@@ -100,7 +102,8 @@ class FuzzLoop(object):
                  batch_size=200, batches_per_round=3, rounds=10, patience=2,
                  max_len=64, keep_is_param=False, conf_limit=0.0,
                  daikon_args=(), guidance=True, coverage=True,
-                 frontend="kvasir", tier=7, bug_check=True, log=print):
+                 frontend="kvasir", tier=7, bug_check=True, learn_once=False,
+                 time_limit=None, log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -127,6 +130,12 @@ class FuzzLoop(object):
         # The bug checker needs source (a sanitizer build), so it is
         # source-mode only.
         self.bug_check = bug_check and frontend == "kvasir"
+        # learn_once: Daikon learns from the seeds ONCE and the fuzzer attacks
+        # that fixed set for the whole run (InvsCov-style). Daikon runs again
+        # only at the very end, to score which of those rules were refuted.
+        self.learn_once = learn_once
+        self.time_limit = time_limit   # seconds, or None
+        self.t0 = time.time()
         self.bugs = {}            # (kind, location) -> record
         self._bug_inputs = set()  # inputs that found a NEW bug this batch
         self.tier = tier
@@ -246,7 +255,7 @@ class FuzzLoop(object):
                     with open(os.path.join(self.out, "bugs", name), "wb") as f:
                         f.write(inputs[i])
                     rec = dict(b.as_dict(), input=inputs[i].hex(), file=name,
-                               round=self._round, hits=0)
+                               round=self._round, time=self._elapsed(), hits=0)
                     self.bugs[b.key] = rec
                     self._bug_inputs.add(inputs[i])
                     self.log("    [BUG] %s at %s%s <- %s" % (
@@ -255,6 +264,12 @@ class FuzzLoop(object):
                         inputs[i].hex() or "(empty input)"))
                     self.log("          %s" % b.message)
                 rec["hits"] += 1
+
+    def _elapsed(self):
+        return time.time() - self.t0
+
+    def _out_of_time(self):
+        return self.time_limit is not None and self._elapsed() >= self.time_limit
 
     def _save_crash(self, data, reason):
         name = "%s.%s.bin" % (_sha(data), reason.replace(" ", "_"))
@@ -312,7 +327,7 @@ class FuzzLoop(object):
                 self.keep_counts[kind] = self.keep_counts.get(kind, 0) + 1
 
         idx = len(self.corpus)
-        entry = Entry(data, samples, round_, ", ".join(reasons))
+        entry = Entry(data, samples, round_, ", ".join(reasons), self._elapsed())
         self.corpus.append(entry)
         self.seen_features |= feats
         with open(os.path.join(self.out, "corpus", _sha(data) + ".bin"), "wb") as f:
@@ -375,7 +390,7 @@ class FuzzLoop(object):
             f.write(text)
         report = invariants.parse_report(text)
         report = {p: v for p, v in report.items() if ";condition=" not in p}
-        refuted = self.history.observe(round_, report)
+        refuted = self.history.observe(round_, report, self._elapsed())
         self.compiled, self.unsupported = invariants.compile_report(report)
         supported = {inv.key for invs in self.compiled.values() for inv in invs}
         for key, rec in self.history.inv.items():
@@ -421,6 +436,8 @@ class FuzzLoop(object):
                 self.san_exe = runner.build_san(self.target_c, self.work)
         self._round = 0
         seeds = self._load_seeds()
+        # The clock starts after compiling, as AFL++'s does.
+        self.t0 = time.time()
         self.log("[+] target  %s" % self.target_c)
         self.log("[+] seeds   %d" % len(seeds))
         for data, feats, samples in self._execute(seeds):
@@ -451,6 +468,8 @@ class FuzzLoop(object):
             bugs_before = len(self.bugs)
             added = 0
             for _ in range(self.batches_per_round):
+                if self._out_of_time():
+                    break
                 cands = []
                 tries = 0
                 while len(cands) < self.batch_size and tries < self.batch_size * 20:
@@ -466,7 +485,10 @@ class FuzzLoop(object):
                     if self._consider(data, feats, samples, r):
                         added += 1
                 self._update_min_distances()
-            report, refuted = self._infer(r)
+            if self.learn_once:
+                refuted = []          # rules stay fixed until the final scoring run
+            else:
+                report, refuted = self._infer(r)
             self._update_min_distances()
             n_inv = sum(len(v) for v in report.values())
             new_feats = len(self.seen_features) - feats_before
@@ -514,6 +536,15 @@ class FuzzLoop(object):
             if quiet >= self.patience:
                 self.log("[+] fixed point: %d quiet round(s)" % quiet)
                 break
+            if self._out_of_time():
+                self.log("[+] time limit reached after %.0fs" % self._elapsed())
+                break
+        if self.learn_once:
+            # Score the fixed round-0 rules against everything the run kept.
+            _, refuted = self._infer(r)
+            self.log("[+] learn-once: final Daikon run refutes %d of the round-0 "
+                     "rules" % len(refuted))
+        self.stats["seconds_total"] = self._elapsed()
         self._write_summary()
         return self.history
 
@@ -542,6 +573,10 @@ class FuzzLoop(object):
             "corpus_size": len(self.corpus),
             "crashes": self.crashes,
             "bugs": sorted(self.bugs.values(), key=lambda b: (b["round"], b["location"])),
+            "mode": {"learn_once": self.learn_once, "guidance": self.guidance,
+                     "coverage": self.coverage, "time_limit": self.time_limit},
+            "corpus": [{"input": e.data.hex(), "round": e.round, "time": e.time,
+                        "reason": e.reason} for e in self.corpus],
             "invariants": sorted(self.history.inv.values(),
                                  key=lambda r: (r["ppt"], r["first_round"], r["text"])),
             "disagreements": self._disagreements(),

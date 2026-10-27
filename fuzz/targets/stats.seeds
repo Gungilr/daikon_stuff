@@ -1,0 +1,7 @@
+# stats.c seeds: n >= 1 always, and the first three values in descending
+# order, so max3's broken branch is never taken.
+0309050102
+0464320a01
+0105
+0303020100
+0507060504030201

@@ -82,6 +82,27 @@ def parse_stderr(text, own_sources=()):
                 pass
             i += 1
             continue
+        if line.startswith("@@FUZZ-DIED "):
+            # The forked child for this input was killed by a signal and no
+            # sanitizer report preceded it (ASan exits normally after one).
+            # SIGFPE (8) is skipped: UBSan's integer-divide-by-zero check always
+            # reports before the trap, so an unreported SIGFPE is only a repeat
+            # of a location this process already printed.
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] != "8" and not bugs.get(int(parts[1])):
+                bugs.setdefault(int(parts[1]), []).append(Bug(
+                    "signal", "signal %s" % parts[2], "?",
+                    "killed by signal %s" % parts[2]))
+            i += 1
+            continue
+        if line.startswith("@@BUG ") and cur is not None:
+            # Ground-truth marker from a -DFUZZ_ORACLE build (benchmarking only).
+            parts = line.split()
+            bugs.setdefault(cur, []).append(Bug(
+                "oracle", parts[1], parts[1], "planted bug triggered",
+                parts[2] if len(parts) > 2 else None))
+            i += 1
+            continue
         m = _UBSAN.match(line)
         if m and cur is not None:
             msg = m.group("msg")

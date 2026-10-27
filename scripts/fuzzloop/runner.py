@@ -143,14 +143,27 @@ def _describe_exit(rc):
 # UBSan is recoverable so one input can report several problems and the batch
 # continues; ASan aborts, and run_san restarts after the culprit.
 SAN_CFLAGS = ["-O0", "-g", "-fsanitize=address,undefined",
-              "-fsanitize-recover=undefined", "-fno-omit-frame-pointer"]
-SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=0:abort_on_error=0:symbolize=1",
+              "-fsanitize-recover=address,undefined", "-fno-omit-frame-pointer"]
+# Recover mode: every report is printed and the batch keeps going. Fatal
+# signals are left to the harness, which reports and moves to the next input.
+# Both runtimes print each distinct source location once per process, so a
+# bug's `hits` counts the batches it fired in, not every input.
+SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=0:halt_on_error=0:symbolize=1:"
+                           "handle_segv=0:handle_sigbus=0:handle_sigfpe=0:"
+                           "handle_sigill=0",
            "UBSAN_OPTIONS": "print_stacktrace=0:halt_on_error=0"}
 
 
 def build_san(target_c, workdir, cc=None):
-    """Path of the sanitizer build of the target, with the batch harness."""
-    cc = cc or os.environ.get("CC", "gcc")
+    """Path of the sanitizer build of the target, with the batch harness.
+
+    Prefers clang. gcc 13.3's ASan left copy_record() in
+    fuzz/targets/packet.c with no checks at all (zero __asan_report calls in
+    its machine code), so a 32-byte write into a 16-byte stack array went
+    unreported. clang's ASan reports it. Falls back to $CC or gcc.
+    """
+    cc = cc or os.environ.get("SAN_CC") or (shutil.which("clang") and "clang") \
+        or os.environ.get("CC", "gcc")
     os.makedirs(workdir, exist_ok=True)
     name = os.path.splitext(os.path.basename(target_c))[0]
     exe = os.path.join(workdir, name + ".san")

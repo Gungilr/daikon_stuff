@@ -1,0 +1,8 @@
+# packet.c seeds: magic EF BE (0xBEEF little-endian), type, len, payload.
+# Only safe packets: types 0 and 1, short lengths, ASCII payloads.
+efbe0104616263
+efbe010241424344
+efbe0000
+efbe0103787978
+0000000000
+efbe0203313233

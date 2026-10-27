@@ -26,6 +26,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef FUZZ_SAN
+#include <setjmp.h>
+#include <signal.h>
+
+/* The sanitizer build survives fatal signals, so a SIGFPE (division by zero)
+ * or SIGSEGV costs one report, not a restart of the sanitized process.
+ * ASan/UBSan are built and run in recover mode, and told to leave these
+ * signals to us (scripts/fuzzloop/runner.py, SAN_ENV). Forking per input was
+ * measured instead and cost 2.2ms per input under ASan. */
+static sigjmp_buf fuzz_jmp;
+
+static void fuzz_on_signal(int sig) { siglongjmp(fuzz_jmp, sig); }
+
+#define FUZZ_ABANDONED 1000
+
+#ifdef FUZZ_ORACLE
+/* Called by FUZZ_BUG_FATAL: skip the rest of this input, report nothing. */
+void fuzz_oracle_abandon(void) { siglongjmp(fuzz_jmp, FUZZ_ABANDONED); }
+#endif
+
+static void fuzz_catch_signals(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = fuzz_on_signal;
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);   /* e.g. a stack-protector failure */
+}
+#endif
 
 #include "fuzz.h"
 
@@ -71,6 +103,9 @@ int main(int argc, char **argv) {
     FILE *cov = argc > 2 ? fopen(argv[2], "w") : NULL;
 #endif
 
+#ifdef FUZZ_SAN
+    fuzz_catch_signals();
+#endif
     size_t pos = 0;
     unsigned id = 0;
     while (pos + 4 <= len) {
@@ -97,6 +132,16 @@ int main(int argc, char **argv) {
          * belongs to this record (scripts/fuzzloop/bugs.py). */
         fprintf(stderr, "@@FUZZ-INPUT %u\n", id);
         fflush(stderr);
+#endif
+#ifdef FUZZ_SAN
+        int sig = sigsetjmp(fuzz_jmp, 1);
+        if (sig) {
+            if (sig != FUZZ_ABANDONED)
+                fprintf(stderr, "@@FUZZ-DIED %u %d\n", id, sig);
+            pos += n;
+            id++;
+            continue;
+        }
 #endif
         uint8_t *rec = malloc(n ? n : 1);
         memcpy(rec, batch + pos, n);

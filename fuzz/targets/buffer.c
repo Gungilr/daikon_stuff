@@ -15,6 +15,9 @@
  * fully initialized pointee rather than the harness's raw input pointer.
  * Without the memset the tail is uninitialized, Kvasir writes it as
  * `nonsensical`, and Daikon reports nothing about the array at all.
+ *
+ * Planted bugs (benchmark ground truth, see scripts/bench):
+ *   parse_digits_overflow  (UB)  v * 10 + d overflows past ten digits
  */
 #include "../runtime/fuzz.h"
 
@@ -37,8 +40,11 @@ int count_upper(const unsigned char *buf, int n) {
 
 int parse_digits(const unsigned char *buf, int n) {
     int v = 0;
-    for (int i = 0; i < n && buf[i] >= '0' && buf[i] <= '9'; i++)
+    for (int i = 0; i < n && buf[i] >= '0' && buf[i] <= '9'; i++) {
+        FUZZ_BUG("parse_digits_overflow",
+                 (long long)v * 10 + (buf[i] - '0') > 2147483647LL);
         v = v * 10 + (buf[i] - '0');
+    }
     return v;
 }
 

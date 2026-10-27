@@ -49,6 +49,12 @@ def main(argv=None):
     ap.add_argument("--no-bug-check", action="store_true",
                     help="source mode: do not run every input through the "
                          "ASan+UBSan build (built without -fwrapv)")
+    ap.add_argument("--learn-once", action="store_true",
+                    help="Daikon learns rules from the seeds once and never "
+                         "again (InvsCov-style); it runs once more at the end "
+                         "only to score which were refuted")
+    ap.add_argument("--time-limit", type=float, default=None,
+                    help="stop after this many seconds (checked between batches)")
     ap.add_argument("--daikon-arg", action="append", default=[],
                     help="extra argument passed to Daikon (repeatable)")
     args = ap.parse_args(argv)
@@ -67,7 +73,8 @@ def main(argv=None):
                     keep_is_param=args.keep_is_param, conf_limit=args.conf_limit,
                     daikon_args=args.daikon_arg, guidance=not args.no_guidance,
                     coverage=not args.no_coverage, frontend=args.frontend,
-                    tier=args.tier, bug_check=not args.no_bug_check)
+                    tier=args.tier, bug_check=not args.no_bug_check,
+                    learn_once=args.learn_once, time_limit=args.time_limit)
     try:
         loop.run()
     except runner.ToolError as e:
