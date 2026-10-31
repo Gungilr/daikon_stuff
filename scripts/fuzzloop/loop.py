@@ -205,9 +205,18 @@ class FuzzLoop(object):
         if not ok:
             return []
         t0 = time.time()
+        kv_crashed = []
         decls, per_input = runner.run_kvasir(self.kv_exe, [inputs[i] for i in ok],
                                              self.work, self.daikondir,
-                                             ppt_list=self.ppt_list)
+                                             ppt_list=self.ppt_list, crashed=kv_crashed)
+        for local in kv_crashed:
+            self._save_crash(inputs[ok[local]], "kvasir-crash")
+        if kv_crashed:
+            dead = set(kv_crashed)
+            keep = [i for local, i in enumerate(ok) if local not in dead]
+            per_input = {keep.index(ok[local]): v for local, v in per_input.items()
+                         if local not in dead}
+            ok = keep
         self.stats["seconds_kvasir"] += time.time() - t0
         self.stats["kvasir_runs"] += 1
         if self.decls is None:

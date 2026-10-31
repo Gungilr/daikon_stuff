@@ -33,3 +33,5 @@ fuzz-out/
 # byte-identity baselines every tier is measured against.
 #   bench-out/     scripts/bench/bench.py runs and scores
 bench-out/
+# libpng sources copied by scripts/bench/make_libpng.py
+fuzz/targets/libpng/src/

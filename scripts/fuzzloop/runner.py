@@ -288,33 +288,64 @@ def apply_call_budget(kv_exe, seeds, workdir, daikondir, ppt_list, budget):
     return path, sorted(dropped, key=lambda x: -x[1])
 
 
-def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0):
+def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
+               crashed=None):
     """(decls, {i: [Sample]}) for a batch of inputs that run cleanly natively.
 
     decls is (header, {ppt: block}); samples are already split per input and
     stripped of harness program points.
+
+    Running natively is no guarantee under Valgrind: on tcas, an
+    out-of-bounds read that lands in mapped memory natively segfaults Kvasir.
+    So a Kvasir failure costs the input it happened in, not the run. The
+    last input whose marker reached the trace is the culprit; the inputs
+    before it keep their samples, and the batch is re-run after it. Culprit
+    indices are appended to `crashed` if given.
     """
     batch_path = os.path.join(workdir, "kv.batch")
     dt_path = os.path.join(workdir, "kv.dtrace")
     dc_path = os.path.join(workdir, "kv.decls")
-    with open(batch_path, "wb") as f:
-        f.write(pack_batch(inputs))
-    for p in (dt_path, dc_path):
-        if os.path.exists(p):
-            os.remove(p)
-    try:
-        select = ["--ppt-list-file=" + ppt_list] if ppt_list else []
-        _run([kvasir_path(daikondir), "--dtrace-file=" + dt_path,
-              "--decls-file=" + dc_path] + select + [kv_exe, batch_path],
-             cwd=workdir, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ToolError("Kvasir timed out on a batch of %d inputs" % len(inputs))
-    with open(dc_path, errors="replace") as f:
-        decls = dtrace.parse_decls(f.read())
-    with open(dt_path, errors="replace") as f:
-        samples = dtrace.parse_dtrace(f.read())
-    per_input = dtrace.split_by_input(samples)
-    kept = {i: [s for s in ss if dtrace.keep_ppt(s.ppt)] for i, ss in per_input.items()}
+    select = ["--ppt-list-file=" + ppt_list] if ppt_list else []
+    decls, kept = None, {}
+    pending = list(range(len(inputs)))
+    while pending:
+        with open(batch_path, "wb") as f:
+            f.write(pack_batch([inputs[i] for i in pending]))
+        for p in (dt_path, dc_path):
+            if os.path.exists(p):
+                os.remove(p)
+        cmd = [kvasir_path(daikondir), "--dtrace-file=" + dt_path,
+               "--decls-file=" + dc_path] + select + [kv_exe, batch_path]
+        try:
+            p = subprocess.run(cmd, cwd=workdir, timeout=timeout,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            failed = p.returncode != 0
+            err = p.stderr.decode(errors="replace")
+        except subprocess.TimeoutExpired:
+            failed, err = True, "timeout"
+        if decls is None and os.path.exists(dc_path):
+            with open(dc_path, errors="replace") as f:
+                decls = dtrace.parse_decls(f.read())
+        samples = []
+        if os.path.exists(dt_path):
+            with open(dt_path, errors="replace") as f:
+                samples = dtrace.parse_dtrace(f.read())
+        per_input = dtrace.split_by_input(samples)
+        if not failed:
+            for local, ss in per_input.items():
+                kept[pending[local]] = [s for s in ss if dtrace.keep_ppt(s.ppt)]
+            break
+        if not per_input:
+            raise ToolError("Kvasir failed before any input:\n%s" % err[-3000:])
+        bad = max(per_input)
+        for local, ss in per_input.items():
+            if local < bad:
+                kept[pending[local]] = [s for s in ss if dtrace.keep_ppt(s.ppt)]
+        if crashed is not None:
+            crashed.append(pending[bad])
+        pending = pending[bad + 1:]
+    if decls is None:
+        raise ToolError("Kvasir wrote no declarations")
     return decls, kept
 
 
