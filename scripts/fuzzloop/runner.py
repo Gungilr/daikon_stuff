@@ -322,7 +322,7 @@ def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
             failed = p.returncode != 0
             err = p.stderr.decode(errors="replace")
         except subprocess.TimeoutExpired:
-            failed, err = True, "timeout"
+            failed, err = "timeout", "timeout"
         if decls is None and os.path.exists(dc_path):
             with open(dc_path, errors="replace") as f:
                 decls = dtrace.parse_decls(f.read())
@@ -334,6 +334,14 @@ def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
         if not failed:
             for local, ss in per_input.items():
                 kept[pending[local]] = [s for s in ss if dtrace.keep_ppt(s.ppt)]
+            break
+        if failed == "timeout":
+            # Out of time, not a crash: keep the inputs that finished and drop
+            # the rest of the batch rather than paying the timeout again.
+            last = max(per_input) if per_input else -1
+            for local, ss in per_input.items():
+                if local < last:
+                    kept[pending[local]] = [s for s in ss if dtrace.keep_ppt(s.ppt)]
             break
         if not per_input:
             raise ToolError("Kvasir failed before any input:\n%s" % err[-3000:])

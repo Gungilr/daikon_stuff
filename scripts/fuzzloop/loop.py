@@ -20,6 +20,7 @@ import json
 import math
 import os
 import random
+import subprocess
 import time
 
 from . import dtrace, invariants, runner
@@ -208,7 +209,8 @@ class FuzzLoop(object):
         kv_crashed = []
         decls, per_input = runner.run_kvasir(self.kv_exe, [inputs[i] for i in ok],
                                              self.work, self.daikondir,
-                                             ppt_list=self.ppt_list, crashed=kv_crashed)
+                                             ppt_list=self.ppt_list, crashed=kv_crashed,
+                                             timeout=self._tool_timeout(600))
         for local in kv_crashed:
             self._save_crash(inputs[ok[local]], "kvasir-crash")
         if kv_crashed:
@@ -277,6 +279,14 @@ class FuzzLoop(object):
                         inputs[i].hex() or "(empty input)"))
                     self.log("          %s" % b.message)
                 rec["hits"] += 1
+
+    def _tool_timeout(self, default):
+        """A Kvasir or Daikon run may use the rest of the budget plus a margin,
+        never a fixed 10 minutes: under Kvasir an input can run ~50x slower
+        than natively, and print_tokens once hung a run for 24 minutes."""
+        if self.time_limit is None:
+            return default
+        return max(30.0, self.time_limit - self._elapsed() + 30.0)
 
     def _elapsed(self):
         return time.time() - self.t0
@@ -397,7 +407,8 @@ class FuzzLoop(object):
         decls_path, dt_path = self._write_corpus_trace()
         t0 = time.time()
         text = runner.run_daikon(decls_path, dt_path, self.work, self.daikondir,
-                                 conf_limit=self.conf_limit, extra_args=self.daikon_args)
+                                 conf_limit=self.conf_limit, extra_args=self.daikon_args,
+                                 timeout=self._tool_timeout(1800) + 90)
         self.stats["seconds_daikon"] += time.time() - t0
         self.stats["daikon_runs"] += 1
         with open(os.path.join(self.out, "rounds", "round_%02d.txt" % round_), "w") as f:
@@ -510,7 +521,11 @@ class FuzzLoop(object):
             if self.learn_once:
                 refuted = []          # rules stay fixed until the final scoring run
             else:
-                report, refuted = self._infer(r)
+                try:
+                    report, refuted = self._infer(r)
+                except subprocess.TimeoutExpired:
+                    self.log("[!] Daikon did not finish within the budget; stopping")
+                    break
             self._update_min_distances()
             n_inv = sum(len(v) for v in report.values())
             new_feats = len(self.seen_features) - feats_before
@@ -563,9 +578,12 @@ class FuzzLoop(object):
                 break
         if self.learn_once:
             # Score the fixed round-0 rules against everything the run kept.
-            _, refuted = self._infer(r)
-            self.log("[+] learn-once: final Daikon run refutes %d of the round-0 "
-                     "rules" % len(refuted))
+            try:
+                _, refuted = self._infer(r)
+                self.log("[+] learn-once: final Daikon run refutes %d of the round-0 "
+                         "rules" % len(refuted))
+            except subprocess.TimeoutExpired:
+                self.log("[!] final Daikon run did not finish within the budget")
         self.stats["seconds_total"] = self._elapsed()
         self._write_summary()
         return self.history

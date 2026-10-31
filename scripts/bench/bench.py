@@ -330,13 +330,17 @@ def main(argv=None):
             shutil.rmtree(od, ignore_errors=True)
             os.makedirs(os.path.dirname(od), exist_ok=True)
             t0 = time.time()
-            if tool == "afl":
-                run_afl(t, od, s, args.budget, afl_bins[t])
-            else:
-                run_loop(t, od, s, args.budget, tool == "learn-once", args.max_len,
-                         args.call_budget)
+            note = ""
+            try:
+                if tool == "afl":
+                    run_afl(t, od, s, args.budget, afl_bins[t])
+                else:
+                    run_loop(t, od, s, args.budget, tool == "learn-once", args.max_len,
+                             args.call_budget)
+            except subprocess.TimeoutExpired:
+                note = "  KILLED (ran past 3x budget)"     # scored on what it kept
             open(od + ".done", "w").close()
-            return "%-14s %-10s seed %d  %.0fs" % (t, tool, s, time.time() - t0)
+            return "%-14s %-10s seed %d  %.0fs%s" % (t, tool, s, time.time() - t0, note)
         with cf.ThreadPoolExecutor(args.jobs) as ex:
             for line in ex.map(go, jobs):
                 print(line, flush=True)
