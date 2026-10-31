@@ -111,12 +111,27 @@ struct fuzz_progress {
  * stack-held loop counters just above fuzz_target's frame got overwritten:
  * `pos` jumped backwards and the batch replayed with ever-growing ids
  * (80,201 inputs traced for a batch of 908). Statics also survive the
- * sanitizer build's siglongjmp without needing `volatile` locals. */
-static const uint8_t *fuzz_batch;
-static size_t fuzz_len;
-static struct fuzz_progress *volatile fuzz_pr;
+ * sanitizer build's siglongjmp without needing `volatile` locals.
+ *
+ * Kvasir writes every global at every sample until the loop's var list is
+ * in place, and follows pointers: a `const uint8_t *` batch pointer dumped
+ * the whole batch at each program point. So the one static is the address
+ * of the state as an integer, which Kvasir prints as a number. */
+struct fuzz_state {
+    const uint8_t *batch;
+    size_t len;
+    struct fuzz_progress *pr;
 #ifdef FUZZ_COV
-static FILE *fuzz_cov;
+    FILE *cov;
+#endif
+};
+static uintptr_t fuzz_state_addr;
+#define FS ((struct fuzz_state *)fuzz_state_addr)
+#define fuzz_batch (FS->batch)
+#define fuzz_len (FS->len)
+#define fuzz_pr (FS->pr)
+#ifdef FUZZ_COV
+#define fuzz_cov (FS->cov)
 #endif
 
 /* Abort the batch if the target scribbled on the loop state anyway (a
@@ -258,6 +273,8 @@ int main(int argc, char **argv) {
         perror(argv[1]);
         return 2;
     }
+    /* On the heap: a static here would be one more global for Kvasir. */
+    fuzz_state_addr = (uintptr_t)calloc(1, sizeof(struct fuzz_state));
 #ifdef FUZZ_COV
     fuzz_cov = argc > 2 ? fopen(argv[2], "w") : NULL;
 #endif
@@ -272,8 +289,7 @@ int main(int argc, char **argv) {
     if (fork_env && *fork_env == '1') {
         rc = fork_server();
     } else {
-        static struct fuzz_progress pr;
-        fuzz_pr = &pr;
+        fuzz_pr = calloc(1, sizeof(struct fuzz_progress));
         run_records();
     }
 #ifdef FUZZ_COV
