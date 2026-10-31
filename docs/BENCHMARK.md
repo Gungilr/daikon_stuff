@@ -404,3 +404,57 @@ print_tokens, 2.0 to 0.66 s on tcas, 3.5 to 1.3 s on tot_info, and 2.8 to
 - **A first fix made it worse**: a static batch pointer, which Kvasir
   follows, dumped the whole batch at every program point (339 MB per
   batch instead of 10 MB). Caught by Juliet dropping to 6k executions.
+
+# Does invariant guidance help exploration? (`no-guidance` ablation)
+
+Same setup as the sampling row above (`--trace-sample 0.1`, 180 s, 3 seeds).
+`no-guidance` is the same loop with `--no-guidance`: inputs are kept only
+for new coverage and parents are picked uniformly. Rule-breaking inputs
+still raise alarms (recorded, never mutated), so detection is identical and
+only the steering differs. The loop and AFL++ rows are the runs above.
+
+| tool | triggered | reported | memory/UB | logic | alarm precision | median executions |
+|---|---|---|---|---|---|---|
+| loop (guided) | **78/99** | **56/99** | 30 | **26** | 40/3233 | 47,009 |
+| no-guidance | 68/99 | 51/99 | 30 | 21 | 38/3202 | 47,014 |
+| AFL++ | 62/99 | 47/99 | 30 | 17 | – | 540,083 |
+
+Per bug, reported/triggered runs out of 3 (only bugs where the two differ):
+
+| bug | guided | no-guidance | AFL++ |
+|---|---|---|---|
+| tcas_enabled_ge | 3/3 | 1/2 | 0/0 |
+| tcas_above_le | 1/2 | 1/1 | 0/0 |
+| tot_info_gt | 3/3 | 1/2 | 3/3 |
+| tot_pi_ge | 2/2 | 0/0 | 0/2 |
+| pt_token_len | 0/3 | 1/3 | 1/1 |
+| pt2_tokend_semi | 0/3 | 1/3 | 1/3 |
+| pt2_charconst_alpha | 2/3 | 1/3 | 2/3 |
+| pt2_num_dot | 0/3 | 0/1 | 0/2 |
+| j197_char | 0/3 | 0/1 | 0/0 |
+| j197_short | 0/2 | 0/1 | 0/0 |
+
+## What it shows
+
+- **Guidance pays on arithmetic code.** On tcas and tot_info, guided runs
+  reported 6 more bug-runs (tcas_enabled_ge +2, tot_info_gt +2, tot_pi_ge
+  +2). These are boundary bugs (`>=` vs `>`), and guidance keeps inputs
+  that move a value toward a rule's boundary. It matches where guidance
+  drove the corpus: ~30% of kept inputs on tcas/tot_info were kept for
+  invariant reasons alone, against 0-7% on the parsers.
+- **On the parsers it is neutral to slightly negative.** no-guidance
+  reported pt_token_len and pt2_tokend_semi once each where the guided loop
+  did not; guided got pt2_charconst_alpha once more. Text parsers' state is
+  mostly control flow, which coverage already sees; invariant-driven picks
+  dilute the budget there.
+- **Exploration on Juliet:** guided triggered j197 in 5 runs, no-guidance in
+  2 (neither can report it: the truncation is in a local).
+- **Detection is unchanged** (precision 1.2% both), as designed.
+- **The rest of the gap to AFL++ is not guidance.** Without guidance the loop
+  still triggers 68 vs AFL++'s 62 at 11x fewer executions, almost all on
+  tcas (7 vs 3 triggered): the loop's mutator and value dictionary suit
+  tcas's 12 integer arguments.
+- Caveat: 3 seeds, so single-bug differences are 1-2 runs. tot_info's
+  no-guidance runs also executed fewer inputs (34k vs 54k median), which
+  flatters guidance there. The tcas result (equal executions) is the
+  cleanest evidence.
