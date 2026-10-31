@@ -350,6 +350,20 @@ def _pred_in(lhs, seq):
     return p
 
 
+class _Elem(object):
+    """The row plus `__elem__`, without copying the row for every element."""
+    __slots__ = ("row", "v")
+
+    def __init__(self, row, v):
+        self.row, self.v = row, v
+
+    def __contains__(self, key):
+        return key == "__elem__" or key in self.row
+
+    def __getitem__(self, key):
+        return self.v if key == "__elem__" else self.row[key]
+
+
 def _pred_elements(seq, rest):
     """`A[] elements <pred>`: the predicate holds of every element."""
     g = _compile_expr(seq)
@@ -363,7 +377,7 @@ def _pred_elements(seq, rest):
         for v in s:
             if v is None:
                 continue
-            h, tf, _ = elem(dict(r, __elem__=v))
+            h, tf, _ = elem(_Elem(r, v))
             holds = holds and h
             to_false = tf if to_false is None else min(to_false, tf)
         if to_false is None:
@@ -427,18 +441,75 @@ def _compile_predicate(text):
     return _pred_comparison(*parts)
 
 
+class _Recorder(object):
+    """A read-only view of a row that notes which variables were looked at."""
+    __slots__ = ("row", "seen")
+
+    def __init__(self, row):
+        self.row, self.seen = row, set()
+
+    def __contains__(self, key):
+        self.seen.add(key)
+        return key in self.row
+
+    def __getitem__(self, key):
+        self.seen.add(key)
+        return self.row[key]
+
+
+_ABSENT = object()
+_MEMO_MAX = 4096
+
+
+def _memo_part(v):
+    # Arrays are compared by identity: dtrace.rows() hands out one shared
+    # list per distinct raw value, so a 360-entry global table is one object
+    # for every call that saw it unchanged. Scalars compare by value.
+    return id(v) if isinstance(v, list) else v
+
+
 class Invariant(object):
-    __slots__ = ("ppt", "text", "_pred")
+    __slots__ = ("ppt", "text", "_pred", "_names", "_memo")
 
     def __init__(self, ppt, text, pred):
         self.ppt, self.text, self._pred = ppt, text, pred
+        self._names = ()
+        self._memo = {}
 
     @property
     def key(self):
         return (self.ppt, self.text)
 
     def check(self, row):
-        """(holds, distance) on one row, or None if it cannot be evaluated."""
+        """(holds, distance) on one row, or None if it cannot be evaluated.
+
+        Memoized on the values of the variables the predicate reads: print_tokens
+        has "elements" invariants over 360-entry global tables that are the
+        same on every call, and re-scanning them was 97% of the loop's time.
+        Exact, not approximate: a hit means every variable this invariant has
+        ever read has the same value as in an earlier evaluation.
+        """
+        vals = tuple(row.get(n, _ABSENT) for n in self._names)
+        key = tuple(_memo_part(v) for v in vals)
+        hit = self._memo.get(key)
+        if hit is not None:
+            return hit[1]
+        rec = _Recorder(row)
+        res = self._check(rec)
+        if not rec.seen.issubset(self._names):
+            # Read something new (an implication's consequent, say): widen
+            # the key and forget entries keyed on the narrower one.
+            self._names = tuple(sorted(set(self._names) | rec.seen))
+            self._memo = {}
+            vals = tuple(row.get(n, _ABSENT) for n in self._names)
+            key = tuple(_memo_part(v) for v in vals)
+        if len(self._memo) >= _MEMO_MAX:
+            self._memo = {}
+        # Keep vals alive with the entry so no id() in the key is reused.
+        self._memo[key] = (vals, res)
+        return res
+
+    def _check(self, row):
         try:
             holds, to_false, _ = self._pred(row)
         except (_Missing, TypeError, ValueError, ZeroDivisionError, OverflowError):

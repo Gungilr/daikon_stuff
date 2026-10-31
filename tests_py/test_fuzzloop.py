@@ -287,3 +287,33 @@ def test_seed_file_formats():
     seeds = mutate.parse_seed_file(
         "# comment\ni32: 1 -1\nstr: a # b\n0a0b  # hex\n")
     assert seeds == [struct.pack("<ii", 1, -1), b"a # b", b"\x0a\x0b"]
+
+
+def test_cov_crash_after_the_last_record_blames_that_record(tmp_path):
+    """A memory bug can corrupt the heap and kill the process only after its
+    record reported (Juliet's heap overflow did). That must not end the run."""
+    import os
+    import sys
+    from fuzzloop import runner
+    fake = tmp_path / "fake_cov"
+    fake.write_text(
+        "#!%s\nimport os, signal, sys\n"
+        "open(sys.argv[2], 'w').write('S 0\\nF 0 1\\nS 1\\nF 1 2\\n')\n"
+        "os.kill(os.getpid(), signal.SIGSEGV)\n" % sys.executable)
+    os.chmod(str(fake), 0o755)
+    results, crashes = runner.run_cov(str(fake), [b"a", b"b"], str(tmp_path))
+    assert sorted(results) == [0]
+    assert crashes == [(1, "SIGSEGV")]
+
+
+def test_timeout_kills_the_wrapped_child_too(tmp_path):
+    """kvasir-dtrace is sh around Valgrind: the child holds the pipes open,
+    so killing only the shell let a 40 s timeout run for 300 s."""
+    import subprocess
+    import time
+    from fuzzloop import runner
+    t0 = time.time()
+    with pytest.raises(subprocess.TimeoutExpired):
+        runner._subprocess_run(["sh", "-c", "sleep 30; true"], timeout=1,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert time.time() - t0 < 10

@@ -210,6 +210,26 @@ def parse_value(raw):
         return None
 
 
+_SHARED = {}
+_SHARED_MAX = 50000
+
+
+def _parse_shared(raw):
+    """parse_value, with one shared object per distinct array text.
+
+    Invariant.check() memoizes on array identity, so equal arrays must be the
+    same object. Callers must not mutate the lists.
+    """
+    if not raw.startswith("["):
+        return parse_value(raw)
+    v = _SHARED.get(raw)
+    if v is None:
+        if len(_SHARED) >= _SHARED_MAX:
+            _SHARED.clear()
+        v = _SHARED[raw] = parse_value(raw)
+    return v
+
+
 def rows(samples):
     """[(ppt, {var: value})] with `orig(v)` filled in for EXIT samples.
 
@@ -224,7 +244,7 @@ def rows(samples):
             # modbit 2 means "missing" (no value this time); treat as absent.
             if mod == "2":
                 continue
-            vals[name] = parse_value(raw)
+            vals[name] = _parse_shared(raw)
         if s.ppt.endswith(":::ENTER"):
             entries[(func_of(s.ppt), s.nonce)] = vals
         else:

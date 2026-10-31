@@ -38,8 +38,34 @@ class ToolError(RuntimeError):
     pass
 
 
+def _subprocess_run(cmd, timeout=None, **kw):
+    """subprocess.run, but a timeout kills the command's whole process group.
+
+    kvasir-dtrace is a shell script around Valgrind. subprocess.run's timeout
+    kills only the shell; Valgrind keeps the output pipes open and run()
+    waits for it anyway, so a 40 s timeout on replace became 300 s.
+    """
+    with subprocess.Popen(cmd, start_new_session=True, **kw) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            out, err = proc.communicate()
+            raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _run(cmd, **kw):
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+    p = _subprocess_run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
     if p.returncode != 0:
         raise ToolError("%s failed (%d):\n%s" % (
             " ".join(cmd), p.returncode, p.stderr.decode(errors="replace")[-4000:]))
@@ -107,7 +133,7 @@ def run_cov(cov_exe, inputs, workdir, timeout=10.0):
             os.remove(out_path)
         reason = None
         try:
-            p = subprocess.run([cov_exe, batch_path, out_path], stdout=subprocess.DEVNULL,
+            p = _subprocess_run([cov_exe, batch_path, out_path], stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, timeout=timeout)
             if p.returncode != 0:
                 reason = _describe_exit(p.returncode)
@@ -120,9 +146,17 @@ def run_cov(cov_exe, inputs, workdir, timeout=10.0):
             break
         # The last record that started but never reported is the culprit.
         unfinished = [s for s in started if s not in feats]
-        if not unfinished:
+        if unfinished:
+            bad = unfinished[-1]
+        elif started:
+            # Every started record finished, then the process died between
+            # records or at exit: a memory bug in the last one corrupted the
+            # heap or stack and the damage surfaced later (Juliet's heap
+            # overflow did this). Blame that record and carry on after it.
+            bad = max(started)
+            results.pop(pending[bad], None)
+        else:
             raise ToolError("coverage run failed (%s) outside any input" % reason)
-        bad = unfinished[-1]
         crashes.append((pending[bad], reason))
         pending = pending[bad + 1:]
     return results, crashes
@@ -187,7 +221,7 @@ def run_san(san_exe, inputs, workdir, own_sources=(), timeout=60.0):
         with open(batch_path, "wb") as f:
             f.write(pack_batch([inputs[i] for i in pending]))
         try:
-            p = subprocess.run([san_exe, batch_path], stdout=subprocess.DEVNULL,
+            p = _subprocess_run([san_exe, batch_path], stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, env=env, timeout=timeout)
             err, rc = p.stderr.decode(errors="replace"), p.returncode
         except subprocess.TimeoutExpired as e:
@@ -317,7 +351,7 @@ def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
         cmd = [kvasir_path(daikondir), "--dtrace-file=" + dt_path,
                "--decls-file=" + dc_path] + select + [kv_exe, batch_path]
         try:
-            p = subprocess.run(cmd, cwd=workdir, timeout=timeout,
+            p = _subprocess_run(cmd, cwd=workdir, timeout=timeout,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             failed = p.returncode != 0
             err = p.stderr.decode(errors="replace")
