@@ -329,3 +329,78 @@ program.
 - The print_tokens Daikon runs still overshoot to about 285 s: the first
   batch's Kvasir run is cut at the limit, then its partial trace is scored.
   Bugs are capped at 180 s in scoring, so this does not inflate results.
+
+# Speed work: same benchmark, faster Daikon side
+
+Same 6 programs, 33 bugs, 180 s per run, 3 seeds. AFL++ was not re-run
+(nothing changed on its side). "Before" is the extended benchmark above.
+
+| setup | triggered | reported | memory/UB | logic | alarm precision | median executions |
+|---|---|---|---|---|---|---|
+| loop, before | 68/99 | 50/99 | 30 | 20 | 43/3033 (1.4%) | 6,008 |
+| learn-once, before | 63/99 | 51/99 | 30 | 21 | 56/3065 (1.8%) | 5,008 |
+| loop, speed fixes | 72/99 | 53/99 | 30 | 23 | 57/3382 (1.7%) | 23,504 |
+| learn-once, speed fixes | 68/99 | 52/99 | 30 | 22 | 62/3849 (1.6%) | 19,504 |
+| loop, speed fixes + `--trace-sample 0.1` | **78/99** | **56/99** | 30 | **26** | 43/3233 (1.3%) | 47,009 |
+| learn-once, speed fixes + `--trace-sample 0.1` | 70/99 | 54/99 | 30 | 24 | 72/4431 (1.6%) | 67,005 |
+| AFL++ | 62/99 | 47/99 | 30 | 17 | – | 540,083 |
+
+Median executions per program, before -> speed fixes -> + sampling (loop):
+tcas 9k -> 18k -> 44k, tot_info 15k -> 28k -> 54k, replace 2k -> 32k -> 69k,
+print_tokens 1k -> 13k -> 39k, print_tokens2 3k -> 21k -> 51k,
+juliet 20k -> 39k -> 42k.
+
+## What changed
+
+- **No DynComp after the seed run.** Comparability analysis was 3-12x of
+  Kvasir's time and only feeds the .decls, which the loop takes from the
+  seed run.
+- **A var list.** Kvasir traces only the globals a traced function uses.
+  print_tokens' four 360-entry tables were in every sample. Kvasir needs
+  the parents of `p[].f` / `p->f` listed or Daikon rejects the decls.
+- **Fork server** for the native coverage and sanitizer runs: a crashing
+  input costs a fork (~1 ms), not a restart (~0.1 s). replace's sanitizer
+  time per run went from 63 s to 5 s.
+- **Memoized rule checks** (Python), keyed on the values a rule reads,
+  turned off automatically when the hit rate is low. 17x on print_tokens.
+- **`--trace-sample F`**: inputs that reach new code or a new bug are
+  always traced; the rest only with probability F. Over 3 seeds, replace
+  kept 4 of 6,000 inputs for invariant reasons alone, and print_tokens2 0
+  of 9,000, so most tracing was wasted.
+
+Per 300 inputs, Kvasir went from 8.3 to 0.70 s on replace, 14.8 to 0.84 s on
+print_tokens, 2.0 to 0.66 s on tcas, 3.5 to 1.3 s on tot_info, and 2.8 to
+0.77 s on print_tokens2.
+
+## What it shows
+
+- **Throughput rose about 8x** (median 6k -> 47k executions), still about
+  11x below AFL++.
+- **Speed bought bugs, mostly logic ones.** Logic bugs reported went from
+  20 to 26 (AFL++ 17). Memory/UB stayed at 30 for every tool: those bugs
+  were already all found.
+- **print_tokens is no longer blind.** It triggered nothing before (1k
+  executions). Now pt_delim_or is reported by the loop in 2 of 3 runs, and
+  pt_token_len once by learn-once.
+- **New finds with sampling:** tcas_above_le is reported for the first
+  time (once each by loop and learn-once); tot_pi_ge goes from 1 to 2 runs;
+  rep_subline_gt is reported once.
+- **Precision did not improve** (1.3-1.8%). Speed does not fix
+  over-specific rules; see the next steps.
+- **Juliet barely benefits from sampling** (39k -> 42k): its cost is now
+  the sanitizer build (37 of 63 s in a 60 s run), not tracing.
+- **The loop beats learn-once more clearly once fast** (78 vs 70
+  triggered, 26 vs 24 logic), although learn-once runs more inputs. With
+  sampling, re-learning starts to pay.
+
+## Tool bugs found while running it
+
+- **The harness kept its loop counters on the stack.** Juliet's stack
+  overflows (index from the input) rewrote them in the Kvasir build, where
+  nothing stops them: the batch replayed (80,202 inputs traced for 908) and
+  the run died. 10 of 12 Juliet runs were lost. The state is now on the
+  heap, behind an integer Kvasir does not follow, and checked after every
+  input (exit 86 blames the input that changed it).
+- **A first fix made it worse**: a static batch pointer, which Kvasir
+  follows, dumped the whole batch at every program point (339 MB per
+  batch instead of 10 MB). Caught by Juliet dropping to 6k executions.
