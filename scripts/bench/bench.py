@@ -58,6 +58,8 @@ from fuzzloop.mutate import pack_batch, parse_seed_file   # noqa: E402
 
 TARGETS = ["arith", "buffer", "packet", "stack", "stats"]
 TOOLS = ["loop", "learn-once", "afl"]
+# Also available: "no-guidance", the loop with invariants steering nothing
+# (they still raise alarms), to isolate what the steering is worth.
 AFL = os.path.join(REPO, "AFLplusplus")
 _PLANT = re.compile(r'(FUZZ_BUG_FATAL|FUZZ_BUG|FAULT)\("(\w+)"(?:,\s*(\d+))?')
 
@@ -94,7 +96,7 @@ def planted_bugs(target):
 # --- running ----------------------------------------------------------------
 
 def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20,
-             trace_sample=1.0, batch_size=1000):
+             trace_sample=1.0, batch_size=1000, guidance=True):
     cmd = [sys.executable, os.path.join(REPO, "scripts", "fuzz_loop.py"),
            target_src(target), "-o", outdir,
            "--rounds", "100000", "--patience", "100000", "--time-limit", str(budget),
@@ -102,6 +104,8 @@ def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20,
            "--call-budget", str(call_budget), "--trace-sample", str(trace_sample)]
     if learn_once:
         cmd.append("--learn-once")
+    if not guidance:
+        cmd.append("--no-guidance")
     with open(outdir + ".log", "w") as log:
         subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=REPO,
                        timeout=budget * 3 + 900)
@@ -263,7 +267,10 @@ def score_run(tool, target, outdir, oracles, san, planted, workdir, budget=None)
             pass
     else:
         h = json.load(open(os.path.join(outdir, "history.json")))
-        kept = [(bytes.fromhex(e["input"]), e["time"]) for e in h["corpus"]]
+        # The no-guidance ablation records rule-breaking inputs it did not
+        # keep as "alarms"; they count like corpus entries that broke a rule.
+        entries = h["corpus"] + h.get("alarms", [])
+        kept = [(bytes.fromhex(e["input"]), e["time"]) for e in entries]
         kept += [(bytes.fromhex(b["input"]), b["time"]) for b in h["bugs"]]
         kept_t = triggers(oracles, planted, [d for d, _ in kept], workdir)
         for (data, t), (ids, fn) in zip(kept, kept_t):
@@ -277,7 +284,7 @@ def score_run(tool, target, outdir, oracles, san, planted, workdir, budget=None)
         # function. (The rule may also be broken by correct inputs, so this
         # flags a suspect, not a proof; see the precision count.)
         alarms = true_alarms = 0
-        for e, (ids, fn) in zip(h["corpus"], kept_t):
+        for e, (ids, fn) in zip(entries, kept_t):
             if e["round"] == 0:
                 continue
             vf = {k[0].split("(")[0].lstrip(".") for k in e.get("violates", [])}
@@ -341,7 +348,8 @@ def main(argv=None):
                     run_afl(t, od, s, args.budget, afl_bins[t])
                 else:
                     run_loop(t, od, s, args.budget, tool == "learn-once", args.max_len,
-                             args.call_budget, args.trace_sample, args.batch_size)
+                             args.call_budget, args.trace_sample, args.batch_size,
+                             guidance=tool != "no-guidance")
             except subprocess.TimeoutExpired:
                 note = "  KILLED (ran past 3x budget)"     # scored on what it kept
             open(od + ".done", "w").close()

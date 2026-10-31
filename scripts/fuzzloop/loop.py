@@ -121,6 +121,7 @@ class FuzzLoop(object):
         # False gives the ablation baseline: a plain coverage-guided fuzzer
         # whose corpus Daikon re-reads, with invariants steering nothing.
         self.guidance = guidance
+        self.alarms = []        # rule-breaking inputs not kept (no guidance)
         # False gives the opposite ablation: invariants are the only metric,
         # and new coverage alone never keeps an input.
         self.coverage = coverage
@@ -358,6 +359,16 @@ class FuzzLoop(object):
         if progress and self.guidance and not force:
             reasons.append("closer to %d" % len(progress))
         if not reasons:
+            if violations and not self.guidance:
+                # The no-guidance ablation still raises the alarm, so the
+                # comparison isolates steering, not detection: the input is
+                # recorded but never becomes a parent.
+                self.alarms.append({"input": data.hex(), "round": round_,
+                                    "time": self._elapsed(),
+                                    "violates": [list(k) for k in sorted(
+                                        k for k, d in dists.items() if d == 0)]})
+                for k in violations:
+                    self.violated[k] = data.hex()
             return None
         for kind, hit in (("bug", data in self._bug_inputs),
                           ("coverage", new_feats), ("violation", violations),
@@ -654,6 +665,7 @@ class FuzzLoop(object):
             "untraced": [[fn, per] for fn, per in getattr(self, "untraced", [])],
             "mode": {"learn_once": self.learn_once, "guidance": self.guidance,
                      "coverage": self.coverage, "time_limit": self.time_limit},
+            "alarms": self.alarms,
             "corpus": [{"input": e.data.hex(), "round": e.round, "time": e.time,
                         "reason": e.reason, "violates": [list(k) for k in e.violates]}
                        for e in self.corpus],
