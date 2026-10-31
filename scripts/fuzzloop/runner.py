@@ -55,7 +55,7 @@ def build(target_c, workdir, cc=None):
     cov_rt = os.path.join(RUNTIME, "cov.c")
 
     kv = os.path.join(workdir, name + ".kv")
-    _run([cc] + KV_CFLAGS + [target_c, harness, "-o", kv])
+    _run([cc] + KV_CFLAGS + [target_c, harness, "-o", kv, "-lm"])
 
     objs = []
     for src, flags in ((target_c, ["-fsanitize-coverage=trace-pc,trace-cmp"]),
@@ -65,7 +65,7 @@ def build(target_c, workdir, cc=None):
         _run([cc] + COV_CFLAGS + flags + ["-c", src, "-o", obj])
         objs.append(obj)
     cov = os.path.join(workdir, name + ".cov")
-    _run([cc] + objs + ["-o", cov])
+    _run([cc] + objs + ["-o", cov, "-lm"])
     return cov, kv
 
 
@@ -168,7 +168,7 @@ def build_san(target_c, workdir, cc=None):
     name = os.path.splitext(os.path.basename(target_c))[0]
     exe = os.path.join(workdir, name + ".san")
     _run([cc] + SAN_CFLAGS + ["-DFUZZ_SAN", target_c,
-                              os.path.join(RUNTIME, "harness.c"), "-o", exe])
+                              os.path.join(RUNTIME, "harness.c"), "-o", exe, "-lm"])
     return exe
 
 
@@ -245,6 +245,47 @@ def write_ppt_list(kv_exe, workdir, daikondir):
     with open(path, "w") as f:
         f.write("\n".join(keep) + "\n")
     return path
+
+
+def apply_call_budget(kv_exe, seeds, workdir, daikondir, ppt_list, budget):
+    """(ppt list path, [(function, calls per input)] dropped).
+
+    Kvasir pays about 1.4 ms per traced call, whatever the arrays involved.
+    On replace, six helpers called once per character made 92% of 50,885
+    calls for 100 inputs: 0.6 s per input. Tracing the seeds once and
+    dropping every function that averages more than `budget` calls per input
+    keeps the loop usable. It also means Daikon learns NOTHING about those
+    functions, so the caller should report what was dropped.
+    """
+    if not budget or not seeds:
+        return ppt_list, []
+    dt = os.path.join(workdir, "calib.dtrace")
+    dc = os.path.join(workdir, "calib.decls")
+    batch = os.path.join(workdir, "calib.batch")
+    with open(batch, "wb") as f:
+        f.write(pack_batch(seeds))
+    _run([kvasir_path(daikondir), "--dtrace-file=" + dt, "--decls-file=" + dc,
+          "--ppt-list-file=" + ppt_list, kv_exe, batch], cwd=workdir, timeout=1800)
+    counts = {}
+    with open(dt, errors="replace") as f:
+        for line in f:
+            if line.endswith(":::ENTER\n"):
+                fn = line[:-len(":::ENTER\n")]
+                counts[fn] = counts.get(fn, 0) + 1
+    with open(ppt_list) as f:
+        names = [n.strip() for n in f if n.strip()]
+    keep, dropped = [], []
+    for n in names:
+        per = counts.get(n, 0) / float(len(seeds))
+        if per > budget and not (dtrace.is_marker(n + ":::ENTER")
+                                 or n.endswith("fuzz_target()")):
+            dropped.append((n, per))
+        else:
+            keep.append(n)
+    path = os.path.join(workdir, "trace.budget.ppts")
+    with open(path, "w") as f:
+        f.write("\n".join(keep) + "\n")
+    return path, sorted(dropped, key=lambda x: -x[1])
 
 
 def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0):
@@ -346,7 +387,7 @@ def build_blackbox(target_c, workdir, cc=None):
     # deliberately; the tracer matches exactly 16 bytes.
     _run([cc, "-O0", "-no-pie", "-fno-stack-protector", "-fwrapv",
           "-Wno-unterminated-string-initialization",
-          target_c, os.path.join(RUNTIME, "harness_bb.c"), "-o", full])
+          target_c, os.path.join(RUNTIME, "harness_bb.c"), "-o", full, "-lm"])
     _run(["strip", "--strip-all", "-o", stripped, full])
     return stripped
 

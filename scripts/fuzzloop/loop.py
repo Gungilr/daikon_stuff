@@ -104,7 +104,7 @@ class FuzzLoop(object):
                  max_len=64, keep_is_param=False, conf_limit=0.0,
                  daikon_args=(), guidance=True, coverage=True,
                  frontend="kvasir", tier=7, bug_check=True, learn_once=False,
-                 time_limit=None, log=print):
+                 time_limit=None, call_budget=0, log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -136,6 +136,9 @@ class FuzzLoop(object):
         # only at the very end, to score which of those rules were refuted.
         self.learn_once = learn_once
         self.time_limit = time_limit   # seconds, or None
+        # Functions averaging more calls per seed input than this are not
+        # traced by Kvasir (0 = trace everything). See apply_call_budget.
+        self.call_budget = call_budget
         self.t0 = time.time()
         self.bugs = {}            # (kind, location) -> record
         self._bug_inputs = set()  # inputs that found a NEW bug this batch
@@ -438,6 +441,14 @@ class FuzzLoop(object):
                 self.san_exe = runner.build_san(self.target_c, self.work)
         self._round = 0
         seeds = self._load_seeds()
+        self.untraced = []
+        if self.frontend == "kvasir" and self.call_budget:
+            self.ppt_list, self.untraced = runner.apply_call_budget(
+                self.kv_exe, seeds, self.work, self.daikondir, self.ppt_list,
+                self.call_budget)
+            for fn, per in self.untraced:
+                self.log("[!] not traced (%.0f calls per seed input > budget %d): %s"
+                         % (per, self.call_budget, fn))
         # The clock starts after compiling, as AFL++'s does.
         self.t0 = time.time()
         self.log("[+] target  %s" % self.target_c)
@@ -575,6 +586,7 @@ class FuzzLoop(object):
             "corpus_size": len(self.corpus),
             "crashes": self.crashes,
             "bugs": sorted(self.bugs.values(), key=lambda b: (b["round"], b["location"])),
+            "untraced": [[fn, per] for fn, per in getattr(self, "untraced", [])],
             "mode": {"learn_once": self.learn_once, "guidance": self.guidance,
                      "coverage": self.coverage, "time_limit": self.time_limit},
             "corpus": [{"input": e.data.hex(), "round": e.round, "time": e.time,

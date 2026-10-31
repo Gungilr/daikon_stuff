@@ -44,6 +44,12 @@ static void fuzz_on_signal(int sig) { siglongjmp(fuzz_jmp, sig); }
 #ifdef FUZZ_ORACLE
 /* Called by FUZZ_BUG_FATAL: skip the rest of this input, report nothing. */
 void fuzz_oracle_abandon(void) { siglongjmp(fuzz_jmp, FUZZ_ABANDONED); }
+
+/* Called by FUZZ_MARK (seeded faults): report, then carry on. */
+int fuzz_mark(const char *id, const char *fn) {
+    fprintf(stderr, "@@BUG %s %s\n", id, fn);
+    return 0;
+}
 #endif
 
 static void fuzz_catch_signals(void) {

@@ -2,6 +2,7 @@
 """Benchmark: the Daikon fuzz loop vs. learn-once vs. AFL++ on planted bugs.
 
     python3 scripts/bench/bench.py --budget 180 --seeds 3 --jobs 3
+    python3 scripts/bench/bench.py --targets tcas,replace --out bench-out/siemens
 
 Three tools, same targets, same seed inputs, same wall-clock budget:
 
@@ -11,23 +12,36 @@ Three tools, same targets, same seed inputs, same wall-clock budget:
   afl         AFL++ 4.21c, afl-clang-fast, persistent mode, ASan + UBSan,
               CmpLog (-c): the standard strong configuration
 
-Scoring uses ground truth no tool sees. Every planted bug is marked
-FUZZ_BUG(id, condition) in the target. A separate oracle build
-(-DFUZZ_ORACLE) prints the id whenever an input meets the condition. Every
-input a tool KEPT (its corpus or queue, plus its bug or crash files) is
-replayed through the oracle, which gives two numbers per bug:
+A target is any fuzz/targets/**/<name>.c with a <name>.seeds beside it.
+
+Scoring uses ground truth no tool sees. Planted bugs are marked in the
+source, and the marks print only in a separate oracle build (-DFUZZ_ORACLE):
+
+  FUZZ_BUG(id, cond) / FUZZ_BUG_FATAL(id, cond)
+      the bug happens when `cond` holds (UB and memory bugs).
+  FAULT(id, k, original, mutant)
+      a seeded logic fault (scripts/bench/make_siemens.py). An input
+      triggers it when the fault both INFECTS the state (original != mutant)
+      AND changes the program's output: the scorer compares against a build
+      with only fault k reverted (-DFUZZ_REVERT=k).
+
+Every input a tool KEPT (its corpus or queue, plus its bug or crash files) is
+replayed through the oracle. That gives, per bug:
 
   triggered  some kept input makes the bug happen, whether or not the tool
              noticed
   reported   the tool said so:
-               - a sanitizer bug or AFL++ crash whose input triggers it, or
-               - (Daikon modes only) a refuted rule in the bug's own function
-                 whose counterexample triggers it
+               - a sanitizer report or AFL++ crash whose input triggers it, or
+               - (Daikon modes only) the triggering input broke a live Daikon
+                 rule in the bug's own function when it was kept
 
+Separately, every distinct sanitizer report location counts as a finding
+whether or not it was planted (the original programs have real bugs too).
 Times are seconds from the start of fuzzing (after compiling).
 """
 import argparse
 import concurrent.futures as cf
+import glob
 import json
 import os
 import re
@@ -40,53 +54,69 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 from fuzzloop import runner                     # noqa: E402
-from fuzzloop.mutate import parse_seed_file     # noqa: E402
+from fuzzloop.mutate import pack_batch, parse_seed_file   # noqa: E402
 
 TARGETS = ["arith", "buffer", "packet", "stack", "stats"]
 TOOLS = ["loop", "learn-once", "afl"]
 AFL = os.path.join(REPO, "AFLplusplus")
+_PLANT = re.compile(r'(FUZZ_BUG_FATAL|FUZZ_BUG|FAULT)\("(\w+)"(?:,\s*(\d+))?')
+
+
+def target_src(target):
+    """Path of a target's source: fuzz/targets/<t>.c or any <t>/<t>.c below."""
+    cands = [os.path.join(REPO, "fuzz", "targets", target + ".c")]
+    cands += sorted(glob.glob(os.path.join(REPO, "fuzz", "targets", "**", target + ".c"),
+                              recursive=True))
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    raise SystemExit("no source for target %r" % target)
 
 
 def planted_bugs(target):
-    """{bug id: (kind, function)} from the FUZZ_BUG markers and comments."""
-    src = open(os.path.join(REPO, "fuzz", "targets", target + ".c")).read()
+    """{bug id: {"kind", "fault"}}. Kind comes from the header comment
+    (`id (memory|UB|logic)`); `fault` is k for FAULT(...) sites, else None."""
+    path = target_src(target)
+    src = open(path, errors="replace").read()
     kinds = dict(re.findall(r"^ \*\s+(\w+)\s+\((memory|logic|UB)\)", src, re.M))
-    out, func = {}, None
-    for line in src.split("\n"):
-        m = re.match(r"^\w[\w\s\*]*?\b(\w+)\(.*\)\s*\{", line)
-        if m:
-            func = m.group(1)
-        for bid in re.findall(r'FUZZ_BUG(?:_FATAL)?\("(\w+)"', line):
-            out[bid] = (kinds.get(bid, "UB"), func)
+    # A bundle target (juliet) keeps its markers in files it #includes.
+    for inc in re.findall(r'#include "(cases/[^"]+)"', src):
+        src += open(os.path.join(os.path.dirname(path), inc), errors="replace").read()
+    out = {}
+    for macro, bid, k in _PLANT.findall(src):
+        if macro == "FAULT":
+            out[bid] = {"kind": "logic", "fault": int(k)}
+        else:
+            out[bid] = {"kind": kinds.get(bid, "UB"), "fault": None}
     return out
 
 
 # --- running ----------------------------------------------------------------
 
-def run_loop(target, outdir, seed, budget, learn_once):
+def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20):
     cmd = [sys.executable, os.path.join(REPO, "scripts", "fuzz_loop.py"),
-           os.path.join(REPO, "fuzz", "targets", target + ".c"), "-o", outdir,
+           target_src(target), "-o", outdir,
            "--rounds", "100000", "--patience", "100000", "--time-limit", str(budget),
-           "--batch-size", "1000", "--seed", str(seed)]
+           "--batch-size", "1000", "--seed", str(seed), "--max-len", str(max_len),
+           "--call-budget", str(call_budget)]
     if learn_once:
         cmd.append("--learn-once")
     with open(outdir + ".log", "w") as log:
         subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=REPO,
-                       timeout=budget * 3 + 600)
+                       timeout=budget * 3 + 900)
 
 
 def build_afl(target, workdir):
     os.makedirs(workdir, exist_ok=True)
-    src = [os.path.join(REPO, "fuzz", "targets", target + ".c"),
-           os.path.join(REPO, "fuzz", "runtime", "afl_harness.c")]
+    src = [target_src(target), os.path.join(REPO, "fuzz", "runtime", "afl_harness.c")]
     main = os.path.join(workdir, target + ".afl")
     cmplog = os.path.join(workdir, target + ".cmplog")
     env = dict(os.environ, AFL_USE_ASAN="1", AFL_USE_UBSAN="1", AFL_QUIET="1")
-    subprocess.run([os.path.join(AFL, "afl-clang-fast"), "-O0", "-g"] + src + ["-o", main],
-                   env=env, check=True, capture_output=True)
+    subprocess.run([os.path.join(AFL, "afl-clang-fast"), "-O0", "-g", "-w"] + src
+                   + ["-o", main, "-lm"], env=env, check=True, capture_output=True)
     env = dict(os.environ, AFL_LLVM_CMPLOG="1", AFL_QUIET="1")
-    subprocess.run([os.path.join(AFL, "afl-clang-fast"), "-O0", "-g"] + src + ["-o", cmplog],
-                   env=env, check=True, capture_output=True)
+    subprocess.run([os.path.join(AFL, "afl-clang-fast"), "-O0", "-g", "-w"] + src
+                   + ["-o", cmplog, "-lm"], env=env, check=True, capture_output=True)
     return main, cmplog
 
 
@@ -94,7 +124,7 @@ def run_afl(target, outdir, seed, budget, bins):
     main, cmplog = bins
     seeds_dir = outdir + ".in"
     os.makedirs(seeds_dir, exist_ok=True)
-    with open(os.path.join(REPO, "fuzz", "targets", target + ".seeds")) as f:
+    with open(os.path.splitext(target_src(target))[0] + ".seeds") as f:
         for i, s in enumerate(parse_seed_file(f.read())):
             with open(os.path.join(seeds_dir, "seed%02d" % i), "wb") as g:
                 g.write(s)
@@ -113,23 +143,79 @@ def run_afl(target, outdir, seed, budget, bins):
 
 # --- scoring ----------------------------------------------------------------
 
-def build_oracle(target, workdir):
+def build_oracles(target, workdir, faults):
+    """{0: all-faults oracle, k: oracle with fault k reverted}, plus the
+    sanitizer build used to locate unplanted findings."""
     os.makedirs(workdir, exist_ok=True)
-    exe = os.path.join(workdir, target + ".oracle")
-    subprocess.run(["gcc", "-O0", "-fwrapv", "-fno-stack-protector", "-DFUZZ_ORACLE",
-                    "-DFUZZ_SAN", os.path.join(REPO, "fuzz", "targets", target + ".c"),
-                    os.path.join(REPO, "fuzz", "runtime", "harness.c"), "-o", exe],
-                   check=True, capture_output=True)
-    return exe
+    out = {}
+    for k in [0] + sorted(faults):
+        exe = os.path.join(workdir, "%s.oracle%s" % (target, "" if k == 0 else "-r%d" % k))
+        subprocess.run(["gcc", "-O0", "-w", "-fwrapv", "-fno-stack-protector",
+                        "-DFUZZ_ORACLE", "-DFUZZ_SAN", "-DFUZZ_REVERT=%d" % k,
+                        target_src(target), os.path.join(REPO, "fuzz", "runtime", "harness.c"),
+                        "-o", exe, "-lm"], check=True, capture_output=True)
+        out[k] = exe
+    san = runner.build_san(target_src(target), workdir)
+    return out, san
 
 
-def triggers(oracle, inputs, workdir):
-    """[set of planted ids] per input."""
+def replay(exe, inputs, workdir, timeout=120):
+    """[(planted ids -> function, output hash)] per input, from an oracle build."""
+    res = [({}, None) for _ in inputs]
+    pending = list(range(len(inputs)))
+    path = os.path.join(workdir, "replay.batch")
+    while pending:
+        with open(path, "wb") as f:
+            f.write(pack_batch([inputs[i] for i in pending]))
+        try:
+            p = subprocess.run([exe, path], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, timeout=timeout)
+            err, rc = p.stderr.decode(errors="replace"), p.returncode
+        except subprocess.TimeoutExpired as e:
+            err, rc = (e.stderr or b"").decode(errors="replace"), "timeout"
+        cur = None
+        for line in err.split("\n"):
+            if line.startswith("@@FUZZ-INPUT "):
+                cur = int(line.split()[1])
+            elif cur is not None and line.startswith("@@BUG "):
+                parts = line.split()
+                res[pending[cur]][0][parts[1]] = parts[2] if len(parts) > 2 else None
+            elif cur is not None and line.startswith("@@OUT "):
+                res[pending[cur]] = (res[pending[cur]][0], line.split()[1])
+        if rc == 0 or cur is None:
+            break
+        pending = pending[cur + 1:]       # the culprit hung or died; skip it
+    return res
+
+
+def triggers(oracles, planted, inputs, workdir):
+    """[(set of triggered ids, {id: function})] per input."""
     if not inputs:
         return []
-    found = runner.run_san(oracle, inputs, workdir)
-    return [{b.kind for b in found.get(i, []) if b.sanitizer == "oracle"}
-            for i in range(len(inputs))]
+    base = replay(oracles[0], inputs, workdir)
+    reverted = {k: replay(exe, inputs, workdir) for k, exe in oracles.items() if k}
+    out = []
+    for i, (marks, outhash) in enumerate(base):
+        hit = set()
+        for bid, fn in marks.items():
+            if bid not in planted:
+                continue
+            k = planted[bid]["fault"]
+            if k is None:
+                hit.add(bid)
+            elif reverted[k][i][1] != outhash:
+                hit.add(bid)          # infected AND the output changed
+        out.append((hit, marks))
+    return out
+
+
+def san_locations(san, inputs, workdir, own):
+    """{(kind, location)} the sanitizer build reports for these inputs."""
+    if not inputs:
+        return set()
+    found = runner.run_san(san, inputs, workdir, own_sources=(own,))
+    return {(b.kind, b.location) for bs in found.values() for b in bs
+            if b.sanitizer in ("asan", "ubsan")}
 
 
 def afl_inputs(outdir, sub):
@@ -146,22 +232,27 @@ def afl_inputs(outdir, sub):
     return out
 
 
-def score_run(tool, target, outdir, oracle, bugs, workdir):
-    trig, rep = {}, {}
+def score_run(tool, target, outdir, oracles, san, planted, workdir, budget=None):
+    trig, rep, funcs = {}, {}, {}
+    own = os.path.basename(target_src(target))
 
     def note(table, ids, t):
+        if budget is not None and t > budget:
+            return            # found after the budget ran out: does not count
         for b in ids:
-            if b in bugs and (b not in table or t < table[b]):
+            if b in planted and (b not in table or t < table[b]):
                 table[b] = t
 
     stats = {}
     if tool == "afl":
         kept = afl_inputs(outdir, "queue") + afl_inputs(outdir, "crashes")
         crashes = afl_inputs(outdir, "crashes")
-        for (data, t), ids in zip(kept, triggers(oracle, [d for d, _ in kept], workdir)):
+        for (data, t), (ids, fn) in zip(kept, triggers(oracles, planted, [d for d, _ in kept], workdir)):
             note(trig, ids, t)
-        for (data, t), ids in zip(crashes, triggers(oracle, [d for d, _ in crashes], workdir)):
+            funcs.update(fn)
+        for (data, t), (ids, _) in zip(crashes, triggers(oracles, planted, [d for d, _ in crashes], workdir)):
             note(rep, ids, t)
+        found = san_locations(san, [d for d, _ in crashes], workdir, own)
         try:
             for line in open(os.path.join(outdir, "default", "fuzzer_stats")):
                 k, _, v = line.partition(":")
@@ -173,30 +264,35 @@ def score_run(tool, target, outdir, oracle, bugs, workdir):
         h = json.load(open(os.path.join(outdir, "history.json")))
         kept = [(bytes.fromhex(e["input"]), e["time"]) for e in h["corpus"]]
         kept += [(bytes.fromhex(b["input"]), b["time"]) for b in h["bugs"]]
-        kept_ids = triggers(oracle, [d for d, _ in kept], workdir)
-        for (data, t), ids in zip(kept, kept_ids):
+        kept_t = triggers(oracles, planted, [d for d, _ in kept], workdir)
+        for (data, t), (ids, fn) in zip(kept, kept_t):
             note(trig, ids, t)
+            funcs.update(fn)
+        sb = [(bytes.fromhex(b["input"]), b["time"]) for b in h["bugs"]]
+        for (data, t), (ids, _) in zip(sb, triggers(oracles, planted, [d for d, _ in sb], workdir)):
+            note(rep, ids, t)
         # Logic bugs, flagged live: when the loop kept a triggering input, that
         # input broke a rule that was current at the time, in the bug's own
         # function. (The rule may also be broken by correct inputs, so this
-        # flags a suspect, not a proof.)
-        for e, ids in zip(h["corpus"], kept_ids):
-            fns = {k[0].split("(")[0].lstrip(".") for k in e.get("violates", [])}
-            note(rep, [b for b in ids if bugs.get(b, (None, None))[1] in fns], e["time"])
-        sb = [(bytes.fromhex(b["input"]), b["time"]) for b in h["bugs"]]
-        for (data, t), ids in zip(sb, triggers(oracle, [d for d, _ in sb], workdir)):
-            note(rep, ids, t)
-        # Logic bugs: a refuted rule in the bug's own function, refuted by an
-        # input that triggers the bug.
-        ref = [r for r in h["invariants"] if r["refuted_round"] is not None
-               and r.get("violated_by") is not None]
-        rins = [bytes.fromhex(r["violated_by"]) for r in ref]
-        for r, ids in zip(ref, triggers(oracle, rins, workdir)):
-            fn = r["ppt"].split("(")[0].lstrip(".")
-            note(rep, [b for b in ids if bugs.get(b, (None, None))[1] == fn],
-                 r.get("refuted_time") or h["stats"]["seconds_total"])
-        stats = {"execs_done": h["stats"]["execs"], "corpus_count": h["corpus_size"]}
-    return {"triggered": trig, "reported": rep, "stats": stats}
+        # flags a suspect, not a proof; see the precision count.)
+        alarms = true_alarms = 0
+        for e, (ids, fn) in zip(h["corpus"], kept_t):
+            if e["round"] == 0:
+                continue
+            vf = {k[0].split("(")[0].lstrip(".") for k in e.get("violates", [])}
+            if not vf:
+                continue
+            alarms += 1
+            hit = [b for b in ids if fn.get(b) in vf]
+            true_alarms += bool(hit)
+            note(rep, hit, e["time"])
+        found = {(b["kind"], b["location"]) for b in h["bugs"]
+                 if b.get("sanitizer") in ("asan", "ubsan")}
+        stats = {"execs_done": h["stats"]["execs"], "corpus_count": h["corpus_size"],
+                 "alarms": alarms, "true_alarms": true_alarms,
+                 "rules_round0": h["rounds"][0]["invariants"] if h["rounds"] else 0}
+    return {"triggered": trig, "reported": rep, "stats": stats, "functions": funcs,
+            "sanitizer_findings": sorted("%s @ %s" % f for f in found)}
 
 
 def main(argv=None):
@@ -206,6 +302,11 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--targets", default=",".join(TARGETS))
     ap.add_argument("--tools", default=",".join(TOOLS))
+    ap.add_argument("--call-budget", type=int, default=20,
+                    help="Daikon modes: skip tracing functions averaging more "
+                         "calls per seed input than this (see apply_call_budget)")
+    ap.add_argument("--max-len", type=int, default=1024,
+                    help="max input length for the Daikon modes (AFL++ has none)")
     ap.add_argument("--out", default=os.path.join(REPO, "bench-out"))
     ap.add_argument("--score-only", action="store_true")
     ap.add_argument("--resume", action="store_true",
@@ -225,34 +326,36 @@ def main(argv=None):
             t, tool, s = job
             od = os.path.join(args.out, t, tool, "seed%d" % s)
             if args.resume and os.path.exists(od + ".done"):
-                return "%-7s %-10s seed %d  already done" % (t, tool, s)
+                return "%-14s %-10s seed %d  already done" % (t, tool, s)
             shutil.rmtree(od, ignore_errors=True)
             os.makedirs(os.path.dirname(od), exist_ok=True)
             t0 = time.time()
             if tool == "afl":
                 run_afl(t, od, s, args.budget, afl_bins[t])
             else:
-                run_loop(t, od, s, args.budget, tool == "learn-once")
+                run_loop(t, od, s, args.budget, tool == "learn-once", args.max_len,
+                         args.call_budget)
             open(od + ".done", "w").close()
-            return "%-7s %-10s seed %d  %.0fs" % (t, tool, s, time.time() - t0)
+            return "%-14s %-10s seed %d  %.0fs" % (t, tool, s, time.time() - t0)
         with cf.ThreadPoolExecutor(args.jobs) as ex:
             for line in ex.map(go, jobs):
                 print(line, flush=True)
 
     results = {}
     for t in targets:
-        bugs = planted_bugs(t)
+        planted = planted_bugs(t)
         work = os.path.join(args.out, "_score", t)
-        oracle = build_oracle(t, work)
+        faults = {v["fault"] for v in planted.values() if v["fault"]}
+        oracles, san = build_oracles(t, work, faults)
         for tool in tools:
             for s in range(args.seeds):
                 od = os.path.join(args.out, t, tool, "seed%d" % s)
                 try:
-                    r = score_run(tool, t, od, oracle, bugs, work)
+                    r = score_run(tool, t, od, oracles, san, planted, work, args.budget)
                 except (OSError, ValueError, KeyError) as e:
                     r = {"error": str(e)}
                 results.setdefault(t, {}).setdefault(tool, []).append(r)
-        results[t]["_bugs"] = {b: list(v) for b, v in bugs.items()}
+        results[t]["_bugs"] = planted
     with open(os.path.join(args.out, "results.json"), "w") as f:
         json.dump({"budget": args.budget, "seeds": args.seeds, "results": results}, f, indent=1)
     print_tables(results, tools, args.seeds, args.budget)
@@ -271,34 +374,43 @@ def print_tables(results, tools, n, budget):
         "%s triggered | %s reported" % (t, t) for t in tools) + " |")
     print("|---|---|---|" + "---|---|" * len(tools))
     for target, per in results.items():
-        for bid, (kind, func) in per["_bugs"].items():
+        for bid, info in per["_bugs"].items():
             cells = []
             for tool in tools:
                 runs = per.get(tool, [])
                 for key in ("triggered", "reported"):
                     cells.append(fmt_times([r.get(key, {}).get(bid) for r in runs], n))
-            print("| %s | %s | %s | %s |" % (target, bid, kind, " | ".join(cells)))
+            print("| %s | %s | %s | %s |" % (target, bid, info["kind"], " | ".join(cells)))
     print("\ntotals (bug-runs found, out of bugs x seeds):\n")
-    print("| tool | triggered | reported | reported: memory/UB | reported: logic | median executions |")
-    print("|---|---|---|---|---|---|")
+    print("| tool | triggered | reported | reported: memory/UB | reported: logic "
+          "| alarm precision | median executions |")
+    print("|---|---|---|---|---|---|---|")
     for tool in tools:
-        tr = rp = rpm = rpl = tot = 0
+        tr = rp = rpm = rpl = tot = al = ta = 0
         execs = []
         for target, per in results.items():
             for r in per.get(tool, []):
                 execs.append(r.get("stats", {}).get("execs_done", 0))
-                for bid, (kind, _) in per["_bugs"].items():
+                al += r.get("stats", {}).get("alarms", 0)
+                ta += r.get("stats", {}).get("true_alarms", 0)
+                for bid, info in per["_bugs"].items():
                     tot += 1
                     tr += bid in r.get("triggered", {})
                     if bid in r.get("reported", {}):
                         rp += 1
-                        if kind == "logic":
+                        if info["kind"] == "logic":
                             rpl += 1
                         else:
                             rpm += 1
-        print("| %s | %d/%d | %d/%d | %d | %d | %s |" % (
+        print("| %s | %d/%d | %d/%d | %d | %d | %s | %s |" % (
             tool, tr, tot, rp, tot, rpm, rpl,
+            "%d/%d" % (ta, al) if al else "-",
             "%d" % statistics.median(execs) if execs else "-"))
+    print("\nsanitizer findings (distinct kind@location, union over seeds):\n")
+    for target, per in results.items():
+        for tool in tools:
+            f = sorted({x for r in per.get(tool, []) for x in r.get("sanitizer_findings", [])})
+            print("  %-14s %-10s %d  %s" % (target, tool, len(f), "; ".join(f)[:300]))
 
 
 if __name__ == "__main__":

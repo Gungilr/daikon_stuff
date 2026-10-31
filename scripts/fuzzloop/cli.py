@@ -55,6 +55,10 @@ def main(argv=None):
                          "only to score which were refuted")
     ap.add_argument("--time-limit", type=float, default=None,
                     help="stop after this many seconds (checked between batches)")
+    ap.add_argument("--call-budget", type=int, default=0,
+                    help="source mode: do not trace functions averaging more than "
+                         "this many calls per seed input (0 = trace all). Kvasir "
+                         "costs ~1.4 ms per traced call.")
     ap.add_argument("--daikon-arg", action="append", default=[],
                     help="extra argument passed to Daikon (repeatable)")
     args = ap.parse_args(argv)
@@ -74,7 +78,8 @@ def main(argv=None):
                     daikon_args=args.daikon_arg, guidance=not args.no_guidance,
                     coverage=not args.no_coverage, frontend=args.frontend,
                     tier=args.tier, bug_check=not args.no_bug_check,
-                    learn_once=args.learn_once, time_limit=args.time_limit)
+                    learn_once=args.learn_once, time_limit=args.time_limit,
+                    call_budget=args.call_budget)
     try:
         loop.run()
     except runner.ToolError as e:

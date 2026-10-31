@@ -87,10 +87,25 @@ void fuzz_oracle_abandon(void);
 #define FUZZ_BUG_FATAL(id, cond) \
     do { if (cond) { fprintf(stderr, "@@BUG %s %s\n", id, __func__); \
                      fuzz_oracle_abandon(); } } while (0)
+int fuzz_mark(const char *id, const char *fn);
+#define FUZZ_MARK(id, cond) ((cond) ? fuzz_mark(id, __func__) : 0)
 #else
 #define FUZZ_BUG(id, cond) ((void)0)
 #define FUZZ_BUG_FATAL(id, cond) ((void)0)
+#define FUZZ_MARK(id, cond) 0
 #endif
+
+/* A seeded fault (logic bug): the program computes `mut` where the correct
+ * program computes `orig`. The oracle build marks the fault whenever the two
+ * differ, i.e. whenever the input INFECTS the program state. A build with
+ * -DFUZZ_REVERT=k computes `orig` for fault number k, so the scorer can check
+ * whether that infection changed the output. Both expressions must be free of
+ * side effects: the oracle evaluates both. */
+#ifndef FUZZ_REVERT
+#define FUZZ_REVERT 0
+#endif
+#define FAULT(id, k, orig, mut) \
+    ((k) == FUZZ_REVERT ? (orig) : (FUZZ_MARK(id, (orig) != (mut)), (mut)))
 
 void fuzz_target(const uint8_t *data, size_t size);
 
