@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #ifdef FUZZ_SAN
 #include <setjmp.h>
 #include <signal.h>
@@ -94,30 +97,29 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return buf;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s BATCH_FILE [COV_OUT]\n", argv[0]);
-        return 2;
-    }
-    size_t len = 0;
-    uint8_t *batch = read_file(argv[1], &len);
-    if (!batch) {
-        perror(argv[1]);
-        return 2;
-    }
-#ifdef FUZZ_COV
-    FILE *cov = argc > 2 ? fopen(argv[2], "w") : NULL;
-#endif
+/* Where the batch run is: the record now running. In fork-server mode it
+ * lives in memory shared with the parent, which reads it when a child dies. */
+struct fuzz_progress {
+    size_t pos;          /* offset of the current record's length field */
+    unsigned id;         /* its id */
+    int running;         /* 1 between a record's start and its end */
+};
 
-#ifdef FUZZ_SAN
-    fuzz_catch_signals();
+static void run_records(const uint8_t *batch, size_t len, struct fuzz_progress *pr
+#ifdef FUZZ_COV
+                        , FILE *cov
 #endif
-    size_t pos = 0;
-    unsigned id = 0;
+                        ) {
+    /* volatile: both change after sigsetjmp and are read after a longjmp. */
+    volatile size_t pos = pr->pos;
+    volatile unsigned id = pr->id;
     while (pos + 4 <= len) {
         uint32_t n = (uint32_t)batch[pos] | (uint32_t)batch[pos + 1] << 8 |
                      (uint32_t)batch[pos + 2] << 16 |
                      (uint32_t)batch[pos + 3] << 24;
+        pr->pos = pos;
+        pr->id = id;
+        pr->running = 1;
         pos += 4;
         if (n > len - pos)
             n = (uint32_t)(len - pos);
@@ -146,6 +148,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "@@FUZZ-DIED %u %d\n", id, sig);
             pos += n;
             id++;
+            pr->running = 0;
             continue;
         }
 #endif
@@ -160,11 +163,111 @@ int main(int argc, char **argv) {
 #endif
         pos += n;
         id++;
+        pr->running = 0;
+    }
+    pr->pos = pos;
+    pr->id = id;
+}
+
+/* Fork-server mode (FUZZ_FORK=1 in the environment; the native and
+ * sanitizer runs use it, Kvasir never does). A record that kills the
+ * process used to cost a restart: exec, ASan start-up, re-reading the batch,
+ * about 0.1 s, and replace's inputs do it hundreds of times per round. Here
+ * a child runs the batch; when it dies, the parent notes the record it died
+ * in and forks a fresh child from the next one, for about 1 ms. */
+static int fork_server(const uint8_t *batch, size_t len
+#ifdef FUZZ_COV
+                       , FILE *cov
+#endif
+                       ) {
+    struct fuzz_progress *pr = mmap(NULL, sizeof *pr, PROT_READ | PROT_WRITE,
+                                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (pr == MAP_FAILED)
+        return -1;
+    memset(pr, 0, sizeof *pr);
+    for (;;) {
+        fflush(NULL);                  /* nothing buffered twice */
+        pid_t pid = fork();
+        if (pid < 0)
+            return -1;
+        if (pid == 0) {
+            run_records(batch, len, pr
+#ifdef FUZZ_COV
+                        , cov
+#endif
+                        );
+            fflush(NULL);
+            _exit(0);
+        }
+        int st;
+        if (waitpid(pid, &st, 0) < 0)
+            return -1;
+        if (WIFEXITED(st) && WEXITSTATUS(st) == 0 && !pr->running)
+            return 0;
+        if (!pr->running)
+            return 1;                  /* died between records: give up */
+        /* The child died inside record pr->id. */
+        int code = WIFSIGNALED(st) ? WTERMSIG(st) : 1000 + WEXITSTATUS(st);
+#ifdef FUZZ_COV
+        if (cov) {
+            fprintf(cov, "X %u %d\n", pr->id, code);
+            fflush(cov);
+        }
+#endif
+#ifdef FUZZ_SAN
+        /* A sanitizer that exits after its report has already said what
+         * happened; a signal has not. */
+        if (WIFSIGNALED(st))
+            fprintf(stderr, "@@FUZZ-DIED %u %d\n", pr->id, code);
+#endif
+        uint32_t n = (uint32_t)batch[pr->pos] | (uint32_t)batch[pr->pos + 1] << 8 |
+                     (uint32_t)batch[pr->pos + 2] << 16 |
+                     (uint32_t)batch[pr->pos + 3] << 24;
+        size_t next = pr->pos + 4 + (n > len - pr->pos - 4 ? len - pr->pos - 4 : n);
+        pr->pos = next;
+        pr->id++;
+        pr->running = 0;
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s BATCH_FILE [COV_OUT]\n", argv[0]);
+        return 2;
+    }
+    size_t len = 0;
+    uint8_t *batch = read_file(argv[1], &len);
+    if (!batch) {
+        perror(argv[1]);
+        return 2;
+    }
+#ifdef FUZZ_COV
+    FILE *cov = argc > 2 ? fopen(argv[2], "w") : NULL;
+#endif
+
+#ifdef FUZZ_SAN
+    fuzz_catch_signals();
+#endif
+    int rc = 0;
+    const char *fork_env = getenv("FUZZ_FORK");
+    if (fork_env && *fork_env == '1') {
+        rc = fork_server(batch, len
+#ifdef FUZZ_COV
+                         , cov
+#endif
+                         );
+    } else {
+        struct fuzz_progress pr = {0, 0, 0};
+        run_records(batch, len, &pr
+#ifdef FUZZ_COV
+                    , cov
+#endif
+                    );
     }
 #ifdef FUZZ_COV
     if (cov)
         fclose(cov);
 #endif
     free(batch);
-    return 0;
+    return rc < 0 ? 3 : rc;
 }

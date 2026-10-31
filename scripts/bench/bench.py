@@ -93,12 +93,13 @@ def planted_bugs(target):
 
 # --- running ----------------------------------------------------------------
 
-def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20):
+def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20,
+             trace_sample=1.0, batch_size=1000):
     cmd = [sys.executable, os.path.join(REPO, "scripts", "fuzz_loop.py"),
            target_src(target), "-o", outdir,
            "--rounds", "100000", "--patience", "100000", "--time-limit", str(budget),
-           "--batch-size", "1000", "--seed", str(seed), "--max-len", str(max_len),
-           "--call-budget", str(call_budget)]
+           "--batch-size", str(batch_size), "--seed", str(seed), "--max-len", str(max_len),
+           "--call-budget", str(call_budget), "--trace-sample", str(trace_sample)]
     if learn_once:
         cmd.append("--learn-once")
     with open(outdir + ".log", "w") as log:
@@ -305,6 +306,10 @@ def main(argv=None):
     ap.add_argument("--call-budget", type=int, default=20,
                     help="Daikon modes: skip tracing functions averaging more "
                          "calls per seed input than this (see apply_call_budget)")
+    ap.add_argument("--trace-sample", type=float, default=1.0,
+                    help="Daikon modes: fraction of inputs without new coverage to trace")
+    ap.add_argument("--batch-size", type=int, default=1000,
+                    help="Daikon modes: candidates per batch")
     ap.add_argument("--max-len", type=int, default=1024,
                     help="max input length for the Daikon modes (AFL++ has none)")
     ap.add_argument("--out", default=os.path.join(REPO, "bench-out"))
@@ -336,7 +341,7 @@ def main(argv=None):
                     run_afl(t, od, s, args.budget, afl_bins[t])
                 else:
                     run_loop(t, od, s, args.budget, tool == "learn-once", args.max_len,
-                             args.call_budget)
+                             args.call_budget, args.trace_sample, args.batch_size)
             except subprocess.TimeoutExpired:
                 note = "  KILLED (ran past 3x budget)"     # scored on what it kept
             open(od + ".done", "w").close()

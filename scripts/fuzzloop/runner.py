@@ -14,6 +14,7 @@ aside and never reach Kvasir, so one bad input cannot cost a whole batch of
 traces.
 """
 import json
+import re
 import os
 import shutil
 import signal
@@ -98,9 +99,9 @@ def build(target_c, workdir, cc=None):
 # --- native coverage runs ---------------------------------------------------
 
 def _parse_cov(path):
-    started, feats, consts = [], {}, {}
+    started, feats, consts, died = [], {}, {}, {}
     if not os.path.exists(path):
-        return started, feats, consts
+        return started, feats, consts, died
     with open(path) as f:
         for line in f:
             parts = line.split()
@@ -113,7 +114,9 @@ def _parse_cov(path):
                 feats[ident] = frozenset(int(x) for x in parts[2:])
             elif tag == "C":
                 consts[ident] = [int(x) for x in parts[2:]]
-    return started, feats, consts
+            elif tag == "X":
+                died[ident] = int(parts[2])
+    return started, feats, consts, died
 
 
 def run_cov(cov_exe, inputs, workdir, timeout=10.0):
@@ -134,14 +137,18 @@ def run_cov(cov_exe, inputs, workdir, timeout=10.0):
         reason = None
         try:
             p = _subprocess_run([cov_exe, batch_path, out_path], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE, timeout=timeout)
+                               stderr=subprocess.PIPE, timeout=timeout,
+                               env=dict(os.environ, FUZZ_FORK="1"))
             if p.returncode != 0:
                 reason = _describe_exit(p.returncode)
         except subprocess.TimeoutExpired:
             reason = "timeout"
-        started, feats, consts = _parse_cov(out_path)
+        started, feats, consts, died = _parse_cov(out_path)
         for local, fs in feats.items():
             results[pending[local]] = (fs, consts.get(local, []))
+        # Records the fork server saw die (the process itself carried on).
+        for local, code in sorted(died.items()):
+            crashes.append((pending[local], _describe_code(code)))
         if reason is None:
             break
         # The last record that started but never reported is the culprit.
@@ -160,6 +167,14 @@ def run_cov(cov_exe, inputs, workdir, timeout=10.0):
         crashes.append((pending[bad], reason))
         pending = pending[bad + 1:]
     return results, crashes
+
+
+# Native and sanitizer runs set FUZZ_FORK=1: the harness's fork server.
+def _describe_code(code):
+    """A fork-server death code: a signal number, or 1000 + exit status."""
+    if code >= 1000:
+        return "exit %d" % (code - 1000)
+    return _describe_exit(-code)
 
 
 def _describe_exit(rc):
@@ -233,7 +248,7 @@ def run_san(san_exe, inputs, workdir, own_sources=(), timeout=60.0):
     found = {}
     pending = list(range(len(inputs)))
     batch_path = os.path.join(workdir, "san.batch")
-    env = dict(os.environ, **SAN_ENV)
+    env = dict(os.environ, FUZZ_FORK="1", **SAN_ENV)
     while pending:
         with open(batch_path, "wb") as f:
             f.write(pack_batch([inputs[i] for i in pending]))
@@ -315,8 +330,9 @@ def apply_call_budget(kv_exe, seeds, workdir, daikondir, ppt_list, budget):
     batch = os.path.join(workdir, "calib.batch")
     with open(batch, "wb") as f:
         f.write(pack_batch(seeds))
-    _run([kvasir_path(daikondir), "--dtrace-file=" + dt, "--decls-file=" + dc,
-          "--ppt-list-file=" + ppt_list, kv_exe, batch], cwd=workdir, timeout=1800)
+    _run([kvasir_path(daikondir), "--no-dyncomp", "--dtrace-file=" + dt,
+          "--decls-file=" + dc, "--ppt-list-file=" + ppt_list, kv_exe, batch],
+         cwd=workdir, timeout=1800)
     counts = {}
     with open(dt, errors="replace") as f:
         for line in f:
@@ -339,8 +355,105 @@ def apply_call_budget(kv_exe, seeds, workdir, daikondir, ppt_list, budget):
     return path, sorted(dropped, key=lambda x: -x[1])
 
 
+def _parse_var_dump(text):
+    """[(section name, [variable lines])] from a --dump-var-file."""
+    out = []
+    for chunk in text.split("----SECTION----"):
+        lines = [l.strip() for l in chunk.split("\n") if l.strip()]
+        if lines:
+            out.append((lines[0], lines[1:]))
+    return out
+
+
+def _global_base(entry):
+    """`/x[]`, `/path_c@f/buf[].a` -> the C name: `x`, `buf`."""
+    tail = entry.rsplit("/", 1)[-1]
+    return re.split(r"\[|\.|->", tail, 1)[0]
+
+
+def _function_globals(kv_exe):
+    """{function name: set of global symbol names its own code touches},
+    from the binary's disassembly.
+
+    -no-pie and -O0 make every global access an absolute or RIP-relative
+    address that objdump prints; matching those against the data symbols'
+    ranges gives each function's globals without parsing C.
+    """
+    syms = []
+    nm = subprocess.run(["nm", "-S", "--defined-only", kv_exe], stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL, check=True).stdout.decode()
+    for line in nm.splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[2] in "dDbBrR" and int(parts[1], 16) > 0:
+            syms.append((int(parts[0], 16), int(parts[0], 16) + int(parts[1], 16),
+                         re.sub(r"\.\d+$", "", parts[3])))
+    out, cur = {}, None
+    dis = subprocess.run(["objdump", "-d", "--no-show-raw-insn", kv_exe],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         check=True).stdout.decode(errors="replace")
+    for line in dis.splitlines():
+        m = re.match(r"^[0-9a-f]+ <([^>]+)>:$", line)
+        if m:
+            cur = m.group(1)
+            out[cur] = set()
+            continue
+        if cur is None:
+            continue
+        for h in re.findall(r"(?:0x|# )([0-9a-f]+)", line):
+            addr = int(h, 16)
+            for lo, hi, name in syms:
+                if lo <= addr < hi:
+                    out[cur].add(name)
+                    break
+    return out
+
+
+def write_var_list(kv_exe, workdir, daikondir, ppt_list):
+    """Path of a --var-list-file that traces only the globals some traced
+    function touches directly, and none of the harness's statics.
+
+    By default Kvasir writes EVERY global at EVERY sample: print_tokens'
+    four 360-entry state tables (used only by next_state, which the call
+    budget leaves untraced) went into each of its 25,000 samples per 300
+    inputs, 72 MB; and the harness's own statics, a jmp_buf among them, went
+    into every sample of every target.
+
+    The list has to be one shared "globals" section: Kvasir's per-function
+    global entries crash it (SIGSEGV) or, without the slash, are ignored.
+    """
+    kv_exe = os.path.abspath(kv_exe)
+    dump = os.path.join(workdir, "all.vars")
+    empty = os.path.join(workdir, "empty.batch")
+    with open(empty, "wb"):
+        pass
+    _run([kvasir_path(daikondir), "--no-dyncomp", "--dump-var-file=" + dump,
+          "--dtrace-file=/dev/null", "--decls-file=/dev/null", kv_exe, empty],
+         cwd=workdir, timeout=120)
+    with open(dump) as f:
+        sections = _parse_var_dump(f.read())
+    with open(ppt_list) as f:
+        traced = {l.strip()[:-2].rsplit(".", 1)[-1] for l in f
+                  if l.strip() and not dtrace.DEFAULT_OMIT.search(l.strip())}
+    used = set()
+    for fn, gl in _function_globals(kv_exe).items():
+        if fn in traced:
+            used |= gl
+    parts = []
+    for name, vars_ in sections:
+        if name == "globals":
+            # Function statics carry their owner: `.../x_c@run_prog/devnull_in`.
+            vars_ = [g for g in vars_ if _global_base(g) in used
+                     and not ("@" in g and dtrace.DEFAULT_OMIT.search(
+                         ".%s()" % g.rsplit("@", 1)[1].split("/")[0]))]
+        parts.append("----SECTION----\n%s\n%s\n" % (name, "\n".join(vars_)))
+    path = os.path.join(workdir, "trace.vars")
+    with open(path, "w") as f:
+        f.write("\n".join(parts))
+    return path
+
+
 def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
-               crashed=None):
+               crashed=None, var_list=None, dyncomp=True):
     """(decls, {i: [Sample]}) for a batch of inputs that run cleanly natively.
 
     decls is (header, {ppt: block}); samples are already split per input and
@@ -357,6 +470,13 @@ def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
     dt_path = os.path.join(workdir, "kv.dtrace")
     dc_path = os.path.join(workdir, "kv.decls")
     select = ["--ppt-list-file=" + ppt_list] if ppt_list else []
+    if var_list:
+        select.append("--var-list-file=" + var_list)
+    if not dyncomp:
+        # DynComp (comparability analysis) is 3-12x of Kvasir's time, and the
+        # comparability it computes lands only in the .decls file. The loop
+        # keeps the seed run's declarations, so later batches need none.
+        select.append("--no-dyncomp")
     decls, kept = None, {}
     pending = list(range(len(inputs)))
     while pending:

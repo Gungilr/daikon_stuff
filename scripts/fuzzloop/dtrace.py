@@ -18,7 +18,7 @@ MARKER_VAR = "fuzz_id"
 # the program, so they never reach Daikon.
 DEFAULT_OMIT = re.compile(
     r"(^|\.)(main|read_file|fuzz_target|fuzz_input_begin|fuzz_cursor_make"
-    r"|fuzz_take_\w+|run_prog|prog_exit|prog_exit_jmp)\(\)")
+    r"|fuzz_take_\w+|run_prog|prog_exit|prog_exit_jmp|run_records|fork_server)\(\)")
 
 _HEADER_KEYS = ("input-language", "decl-version", "var-comparability")
 

@@ -105,7 +105,7 @@ class FuzzLoop(object):
                  max_len=64, keep_is_param=False, conf_limit=0.0,
                  daikon_args=(), guidance=True, coverage=True,
                  frontend="kvasir", tier=7, bug_check=True, learn_once=False,
-                 time_limit=None, call_budget=0, log=print):
+                 time_limit=None, call_budget=0, trace_sample=1.0, log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -140,6 +140,11 @@ class FuzzLoop(object):
         # Functions averaging more calls per seed input than this are not
         # traced by Kvasir (0 = trace everything). See apply_call_budget.
         self.call_budget = call_budget
+        # Fraction of inputs WITHOUT new coverage (or a new bug) that are
+        # traced and offered to the invariant checks. Inputs with new coverage
+        # are always traced: they join the corpus anyway. 1.0 traces all.
+        self.trace_sample = trace_sample
+        self.var_list = None
         self.t0 = time.time()
         self.bugs = {}            # (kind, location) -> record
         self._bug_inputs = set()  # inputs that found a NEW bug this batch
@@ -185,8 +190,9 @@ class FuzzLoop(object):
 
     # -- execution ---------------------------------------------------------
 
-    def _execute(self, inputs):
-        """[(input, features, samples)] for the inputs that ran cleanly."""
+    def _execute(self, inputs, trace_all=False):
+        """[(input, features, samples)] for the inputs that ran cleanly and
+        were traced (see trace_sample)."""
         if self.frontend == "tracer":
             return self._execute_tracer(inputs)
         t0 = time.time()
@@ -203,6 +209,14 @@ class FuzzLoop(object):
                 + time.time() - t0
             self._record_bugs(inputs, found)
         ok = sorted(results)
+        if not trace_all and self.trace_sample < 1.0:
+            novel = [i for i in ok if (results[i][0] - self.seen_features)
+                     or inputs[i] in self._bug_inputs]
+            novel_set = set(novel)
+            rest = [i for i in ok if i not in novel_set]
+            pick = self.rng.sample(rest, int(round(len(rest) * self.trace_sample)))
+            self.stats["untraced"] = self.stats.get("untraced", 0) + len(rest) - len(pick)
+            ok = sorted(novel + pick)
         if not ok:
             return []
         t0 = time.time()
@@ -210,7 +224,9 @@ class FuzzLoop(object):
         decls, per_input = runner.run_kvasir(self.kv_exe, [inputs[i] for i in ok],
                                              self.work, self.daikondir,
                                              ppt_list=self.ppt_list, crashed=kv_crashed,
-                                             timeout=self._tool_timeout(600))
+                                             timeout=self._tool_timeout(600),
+                                             var_list=self.var_list,
+                                             dyncomp=self.decls is None)
         for local in kv_crashed:
             self._save_crash(inputs[ok[local]], "kvasir-crash")
         if kv_crashed:
@@ -469,11 +485,17 @@ class FuzzLoop(object):
             for fn, per in self.untraced:
                 self.log("[!] not traced (%.0f calls per seed input > budget %d): %s"
                          % (per, self.call_budget, fn))
+        if self.frontend == "kvasir":
+            try:
+                self.var_list = runner.write_var_list(self.kv_exe, self.work,
+                                                      self.daikondir, self.ppt_list)
+            except (runner.ToolError, OSError, subprocess.CalledProcessError) as e:
+                self.log("[!] tracing every global (no variable list: %s)" % e)
         # The clock starts after compiling, as AFL++'s does.
         self.t0 = time.time()
         self.log("[+] target  %s" % self.target_c)
         self.log("[+] seeds   %d" % len(seeds))
-        for data, feats, samples in self._execute(seeds):
+        for data, feats, samples in self._execute(seeds, trace_all=True):
             self.seen_inputs.add(data)
             self._consider(data, feats, samples, 0, force=True)
         if not self.corpus:

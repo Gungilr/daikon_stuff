@@ -116,6 +116,46 @@ def _resolve(name, row):
     raise _Missing(name)
 
 
+def _resolver(name):
+    """_resolve(name, row) as a closure, with the name's parsing done once.
+
+    The string rewrite, the regex and (for `buf[return-1]`) the index
+    expression's parse used to run on every check: a third of the loop's
+    Python time on tcas.
+    """
+    if name == "null":
+        return lambda r: 0
+    if name in ("true", "false"):
+        c = 1 if name == "true" else 0
+        return lambda r: c
+    key = name.replace("[]", "[..]")
+    m = re.match(r"^(.*)\[([^\[\]]+)\]$", key)
+    seq_key = idx = None
+    if m and m.group(2) != "..":
+        seq_key = m.group(1) + "[..]"
+        try:
+            idx = _compile_expr(m.group(2))
+        except _Unsupported:
+            idx = None
+
+    def f(row):
+        if key in row:
+            v = row[key]
+            if v is None:
+                raise _Missing(name)
+            return v
+        if seq_key is not None and seq_key in row:
+            seq = row[seq_key]
+            if idx is None:
+                raise _Missing(name)
+            i = idx(row)
+            if (isinstance(seq, list) and isinstance(i, int) and 0 <= i < len(seq)
+                    and seq[i] is not None):
+                return seq[i]
+        raise _Missing(name)
+    return f
+
+
 # --- expressions ------------------------------------------------------------
 #
 # A tiny recursive-descent parser producing closures over a row. Arithmetic
@@ -189,10 +229,10 @@ class _Parser(object):
                 inner = self.var_name()
                 self.take(")")
                 if val == "orig":
-                    full = "orig(%s)" % inner
-                    return lambda r: _resolve(full, r)
-                return lambda r: _size(_resolve(inner, r))
-            return lambda r: _resolve(val, r)
+                    return _resolver("orig(%s)" % inner)
+                get = _resolver(inner)
+                return lambda r: _size(get(r))
+            return _resolver(val)
         raise _Unsupported("unexpected token %r" % (val,))
 
     def var_name(self):
