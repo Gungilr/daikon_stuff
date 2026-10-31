@@ -317,3 +317,17 @@ def test_timeout_kills_the_wrapped_child_too(tmp_path):
         runner._subprocess_run(["sh", "-c", "sleep 30; true"], timeout=1,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert time.time() - t0 < 10
+
+
+def test_own_sources_include_files_the_target_includes(tmp_path):
+    from fuzzloop import runner
+    d = tmp_path / "juliet"
+    (d / "cases").mkdir(parents=True)
+    (d / "juliet.c").write_text("")
+    (d / "cases" / "CWE194.c").write_text("")
+    assert set(runner.own_sources(str(d / "juliet.c"))) == {"juliet.c", "CWE194.c"}
+    top = tmp_path / "targets"
+    top.mkdir()
+    (top / "arith.c").write_text("")
+    (top / "buffer.c").write_text("")
+    assert runner.own_sources(str(top / "arith.c")) == ("arith.c",)

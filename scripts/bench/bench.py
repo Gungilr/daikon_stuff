@@ -213,7 +213,7 @@ def san_locations(san, inputs, workdir, own):
     """{(kind, location)} the sanitizer build reports for these inputs."""
     if not inputs:
         return set()
-    found = runner.run_san(san, inputs, workdir, own_sources=(own,))
+    found = runner.run_san(san, inputs, workdir, own_sources=own)
     return {(b.kind, b.location) for bs in found.values() for b in bs
             if b.sanitizer in ("asan", "ubsan")}
 
@@ -234,7 +234,7 @@ def afl_inputs(outdir, sub):
 
 def score_run(tool, target, outdir, oracles, san, planted, workdir, budget=None):
     trig, rep, funcs = {}, {}, {}
-    own = os.path.basename(target_src(target))
+    own = runner.own_sources(target_src(target))
 
     def note(table, ids, t):
         if budget is not None and t > budget:

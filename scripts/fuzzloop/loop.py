@@ -198,7 +198,7 @@ class FuzzLoop(object):
         if self.bug_check:
             t0 = time.time()
             found = runner.run_san(self.san_exe, inputs, self.work,
-                                   own_sources=(os.path.basename(self.target_c),))
+                                   own_sources=runner.own_sources(self.target_c))
             self.stats["seconds_san"] = self.stats.get("seconds_san", 0.0) \
                 + time.time() - t0
             self._record_bugs(inputs, found)

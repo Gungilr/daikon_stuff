@@ -206,6 +206,23 @@ def build_san(target_c, workdir, cc=None):
     return exe
 
 
+def own_sources(target_c):
+    """Basenames of the C sources that make up a target.
+
+    A target may #include other .c files (Juliet's cases/, libpng's src/).
+    ASan reports are keyed to the first frame in one of these, so with only
+    the top file every memory error in an included case collapsed onto the
+    dispatcher's call line, and Juliet's memcpy(-n) looked like a repeat of
+    an earlier memset(-n).
+    """
+    top = os.path.dirname(os.path.abspath(target_c))
+    names = {os.path.basename(target_c)}
+    if os.path.basename(top) != "targets":      # not the shared top folder
+        for root, _, files in os.walk(top):
+            names.update(f for f in files if f.endswith((".c", ".h")))
+    return tuple(sorted(names))
+
+
 def run_san(san_exe, inputs, workdir, own_sources=(), timeout=60.0):
     """{input index: [bugs.Bug]} for every input that triggered a report.
 
