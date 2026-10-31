@@ -105,28 +105,56 @@ struct fuzz_progress {
     int running;         /* 1 between a record's start and its end */
 };
 
-static void run_records(const uint8_t *batch, size_t len, struct fuzz_progress *pr
+/* The batch and the loop state live in static memory, never on the stack.
+ * Juliet's stack-overflow cases write past a stack array at an index the
+ * input chooses; in the Kvasir and coverage builds nothing stops them, and
+ * stack-held loop counters just above fuzz_target's frame got overwritten:
+ * `pos` jumped backwards and the batch replayed with ever-growing ids
+ * (80,201 inputs traced for a batch of 908). Statics also survive the
+ * sanitizer build's siglongjmp without needing `volatile` locals. */
+static const uint8_t *fuzz_batch;
+static size_t fuzz_len;
+static struct fuzz_progress *volatile fuzz_pr;
 #ifdef FUZZ_COV
-                        , FILE *cov
+static FILE *fuzz_cov;
 #endif
-                        ) {
-    /* volatile: both change after sigsetjmp and are read after a longjmp. */
-    volatile size_t pos = pr->pos;
-    volatile unsigned id = pr->id;
-    while (pos + 4 <= len) {
-        uint32_t n = (uint32_t)batch[pos] | (uint32_t)batch[pos + 1] << 8 |
-                     (uint32_t)batch[pos + 2] << 16 |
-                     (uint32_t)batch[pos + 3] << 24;
-        pr->pos = pos;
-        pr->id = id;
+
+/* Abort the batch if the target scribbled on the loop state anyway (a
+ * global overflow can reach static memory). Exit code 86 reads as a crash
+ * in the record that was running, which is the right one to blame. */
+static void fuzz_check(size_t pos, size_t expect) {
+    if (pos != expect || pos > fuzz_len) {
+        fprintf(stderr, "harness: loop state corrupted by the target\n");
+        _exit(86);
+    }
+}
+
+static uint32_t record_len(size_t pos) {
+    const uint8_t *b = fuzz_batch + pos;
+    return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 |
+           (uint32_t)b[3] << 24;
+}
+
+/* Offset of the record after the one at pos. */
+static size_t next_record(size_t pos) {
+    uint32_t n = record_len(pos);
+    if (n > fuzz_len - pos - 4)
+        n = (uint32_t)(fuzz_len - pos - 4);
+    return pos + 4 + n;
+}
+
+static void run_records(void) {
+    struct fuzz_progress *pr = fuzz_pr;
+    while (pr->pos + 4 <= fuzz_len) {
+        size_t start = pr->pos;
+        uint32_t n = record_len(start);
+        if (n > fuzz_len - start - 4)
+            n = (uint32_t)(fuzz_len - start - 4);
         pr->running = 1;
-        pos += 4;
-        if (n > len - pos)
-            n = (uint32_t)(len - pos);
 #ifdef FUZZ_COV
-        if (cov) {
-            fprintf(cov, "S %u\n", id);
-            fflush(cov);
+        if (fuzz_cov) {
+            fprintf(fuzz_cov, "S %u\n", pr->id);
+            fflush(fuzz_cov);
         }
         fuzz_cov_reset();
 #endif
@@ -138,35 +166,35 @@ static void run_records(const uint8_t *batch, size_t len, struct fuzz_progress *
 #ifdef FUZZ_SAN
         /* The sanitizer build: everything ASan/UBSan print after this line
          * belongs to this record (scripts/fuzzloop/bugs.py). */
-        fprintf(stderr, "@@FUZZ-INPUT %u\n", id);
+        fprintf(stderr, "@@FUZZ-INPUT %u\n", pr->id);
         fflush(stderr);
-#endif
-#ifdef FUZZ_SAN
         int sig = sigsetjmp(fuzz_jmp, 1);
         if (sig) {
+            pr = fuzz_pr;
             if (sig != FUZZ_ABANDONED)
-                fprintf(stderr, "@@FUZZ-DIED %u %d\n", id, sig);
-            pos += n;
-            id++;
+                fprintf(stderr, "@@FUZZ-DIED %u %d\n", pr->id, sig);
+            fuzz_check(pr->pos, start);
+            pr->pos = next_record(pr->pos);
+            pr->id++;
             pr->running = 0;
             continue;
         }
 #endif
         uint8_t *rec = malloc(n ? n : 1);
-        memcpy(rec, batch + pos, n);
-        fuzz_input_begin((int)id);
+        memcpy(rec, fuzz_batch + start + 4, n);
+        fuzz_input_begin((int)pr->id);
         fuzz_target(rec, n);
         free(rec);
+        pr = fuzz_pr;
+        fuzz_check(pr->pos, start);
 #ifdef FUZZ_COV
-        if (cov)
-            fuzz_cov_dump(cov, id);
+        if (fuzz_cov)
+            fuzz_cov_dump(fuzz_cov, pr->id);
 #endif
-        pos += n;
-        id++;
+        pr->pos = next_record(pr->pos);
+        pr->id++;
         pr->running = 0;
     }
-    pr->pos = pos;
-    pr->id = id;
 }
 
 /* Fork-server mode (FUZZ_FORK=1 in the environment; the native and
@@ -175,27 +203,20 @@ static void run_records(const uint8_t *batch, size_t len, struct fuzz_progress *
  * about 0.1 s, and replace's inputs do it hundreds of times per round. Here
  * a child runs the batch; when it dies, the parent notes the record it died
  * in and forks a fresh child from the next one, for about 1 ms. */
-static int fork_server(const uint8_t *batch, size_t len
-#ifdef FUZZ_COV
-                       , FILE *cov
-#endif
-                       ) {
+static int fork_server(void) {
     struct fuzz_progress *pr = mmap(NULL, sizeof *pr, PROT_READ | PROT_WRITE,
                                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (pr == MAP_FAILED)
         return -1;
     memset(pr, 0, sizeof *pr);
+    fuzz_pr = pr;
     for (;;) {
         fflush(NULL);                  /* nothing buffered twice */
         pid_t pid = fork();
         if (pid < 0)
             return -1;
         if (pid == 0) {
-            run_records(batch, len, pr
-#ifdef FUZZ_COV
-                        , cov
-#endif
-                        );
+            run_records();
             fflush(NULL);
             _exit(0);
         }
@@ -204,14 +225,14 @@ static int fork_server(const uint8_t *batch, size_t len
             return -1;
         if (WIFEXITED(st) && WEXITSTATUS(st) == 0 && !pr->running)
             return 0;
-        if (!pr->running)
+        if (!pr->running || pr->pos + 4 > fuzz_len)
             return 1;                  /* died between records: give up */
         /* The child died inside record pr->id. */
         int code = WIFSIGNALED(st) ? WTERMSIG(st) : 1000 + WEXITSTATUS(st);
 #ifdef FUZZ_COV
-        if (cov) {
-            fprintf(cov, "X %u %d\n", pr->id, code);
-            fflush(cov);
+        if (fuzz_cov) {
+            fprintf(fuzz_cov, "X %u %d\n", pr->id, code);
+            fflush(fuzz_cov);
         }
 #endif
 #ifdef FUZZ_SAN
@@ -220,11 +241,7 @@ static int fork_server(const uint8_t *batch, size_t len
         if (WIFSIGNALED(st))
             fprintf(stderr, "@@FUZZ-DIED %u %d\n", pr->id, code);
 #endif
-        uint32_t n = (uint32_t)batch[pr->pos] | (uint32_t)batch[pr->pos + 1] << 8 |
-                     (uint32_t)batch[pr->pos + 2] << 16 |
-                     (uint32_t)batch[pr->pos + 3] << 24;
-        size_t next = pr->pos + 4 + (n > len - pr->pos - 4 ? len - pr->pos - 4 : n);
-        pr->pos = next;
+        pr->pos = next_record(pr->pos);
         pr->id++;
         pr->running = 0;
     }
@@ -242,8 +259,10 @@ int main(int argc, char **argv) {
         return 2;
     }
 #ifdef FUZZ_COV
-    FILE *cov = argc > 2 ? fopen(argv[2], "w") : NULL;
+    fuzz_cov = argc > 2 ? fopen(argv[2], "w") : NULL;
 #endif
+    fuzz_batch = batch;
+    fuzz_len = len;
 
 #ifdef FUZZ_SAN
     fuzz_catch_signals();
@@ -251,22 +270,15 @@ int main(int argc, char **argv) {
     int rc = 0;
     const char *fork_env = getenv("FUZZ_FORK");
     if (fork_env && *fork_env == '1') {
-        rc = fork_server(batch, len
-#ifdef FUZZ_COV
-                         , cov
-#endif
-                         );
+        rc = fork_server();
     } else {
-        struct fuzz_progress pr = {0, 0, 0};
-        run_records(batch, len, &pr
-#ifdef FUZZ_COV
-                    , cov
-#endif
-                    );
+        static struct fuzz_progress pr;
+        fuzz_pr = &pr;
+        run_records();
     }
 #ifdef FUZZ_COV
-    if (cov)
-        fclose(cov);
+    if (fuzz_cov)
+        fclose(fuzz_cov);
 #endif
     free(batch);
     return rc < 0 ? 3 : rc;

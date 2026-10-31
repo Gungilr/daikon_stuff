@@ -524,6 +524,15 @@ def run_kvasir(kv_exe, inputs, workdir, daikondir, ppt_list=None, timeout=600.0,
             with open(dt_path, errors="replace") as f:
                 samples = dtrace.parse_dtrace(f.read())
         per_input = dtrace.split_by_input(samples)
+        if any(not 0 <= i < len(pending) for i in per_input):
+            # An id the batch never handed out: the target overwrote the
+            # harness's loop state, and every sample from there on is
+            # attributed to the wrong input. The harness checks its state
+            # after every record (fuzz_check), so this is a last guard: treat
+            # it as a crash in the last input with a believable id.
+            per_input = {i: ss for i, ss in per_input.items()
+                         if 0 <= i < len(pending)}
+            failed = failed or "corrupted"
         if not failed:
             for local, ss in per_input.items():
                 kept[pending[local]] = [s for s in ss if dtrace.keep_ppt(s.ppt)]

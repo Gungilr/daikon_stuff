@@ -339,3 +339,60 @@ def test_var_list_adds_the_parents_kvasir_needs():
     from fuzzloop import runner
     got = runner._with_parents(["s", "s[].a", "t", "t[].c->d", "t[].c->e"])
     assert got == ["s", "s[]", "s[].a", "t", "t[]", "t[].c[0]", "t[].c->d", "t[].c->e"]
+
+
+@pytest.mark.parametrize("fork", ["0", "1"])
+def test_harness_survives_a_target_that_smashes_its_callers_locals(tmp_path, fork):
+    """Juliet's stack overflows write past a stack array at an index the input
+    picks. With the harness's loop counters on the stack, that reset `pos`
+    and the batch replayed forever under Kvasir (80,201 inputs traced for a
+    batch of 908). The harness must instead stop, blaming that record."""
+    import os
+    import shutil
+    import subprocess
+    from fuzzloop import mutate
+    cc = shutil.which("gcc") or shutil.which("cc")
+    if not cc:
+        pytest.skip("no C compiler")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rt = os.path.join(repo, "fuzz", "runtime")
+    tgt = tmp_path / "smash.c"
+    tgt.write_text(r'''
+#include <stdio.h>
+#include "fuzz.h"
+__attribute__((noinline)) void fuzz_target(const uint8_t *d, size_t n) {
+    printf("call\n");
+    fflush(stdout);
+    if (n && d[0] == 'X') {
+        /* Rewind the caller's loop counter to an earlier record, as a stray
+         * int write did in Juliet. This record's length field is at byte
+         * 5 and its data at byte 9; a counter holding either is sent back
+         * to the same point of record 0 (byte 0, or byte 4 = one before
+         * the old harness adds the length). */
+        size_t *top = __builtin_frame_address(1);
+        for (size_t *w = top - 16; w < top; w++) {
+            if (*w == 5)
+                *w = 0;
+            else if (*w == 9)
+                *w = 4;
+        }
+    }
+}
+''')
+    exe = tmp_path / "smash"
+    subprocess.run([cc, "-O0", "-fno-stack-protector", "-fno-omit-frame-pointer",
+                    "-I", rt, str(tgt), os.path.join(rt, "harness.c"),
+                    "-o", str(exe)], check=True)
+    batch = tmp_path / "b"
+    batch.write_bytes(mutate.pack_batch([b"a", b"X", b"c"]))
+    try:
+        p = subprocess.run([str(exe), str(batch)], capture_output=True,
+                           timeout=10, env=dict(os.environ, FUZZ_FORK=fork))
+    except subprocess.TimeoutExpired:
+        pytest.fail("the harness replayed the batch")
+    calls = p.stdout.decode().count("call")
+    # Either the corruption is caught (nonzero exit, never past the bad
+    # record) or it missed the loop state and all three ran once each.
+    assert calls <= 3
+    if calls < 3:
+        assert p.returncode != 0
