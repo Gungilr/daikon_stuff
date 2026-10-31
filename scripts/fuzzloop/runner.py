@@ -408,6 +408,28 @@ def _function_globals(kv_exe):
     return out
 
 
+def _with_parents(vars_):
+    """Insert the `p[]` entry each `p[].field` needs.
+
+    --dump-var-file lists `p` and `p[].field` (or `p->field`) but not `p[]`
+    (or `p[0]`), and when that list is read back Kvasir declares the field
+    with no enclosing variable, which Daikon rejects ("enclosing-var not
+    specified"). Adding the parents restores the declarations Kvasir writes
+    without a list (checked on all six benchmark targets).
+    """
+    have, out = set(vars_), []
+    for v in vars_:
+        # `p[].f` needs `p[]`; `p->f` needs `p[0]` (Kvasir's name for *p).
+        pres = [v[:m.end()] for m in re.finditer(r"\[\]", v)]
+        pres += [v[:m.start()] + "[0]" for m in re.finditer(r"->", v)]
+        for pre in sorted(pres, key=len):
+            if pre != v and pre not in have:
+                have.add(pre)
+                out.append(pre)
+        out.append(v)
+    return out
+
+
 def write_var_list(kv_exe, workdir, daikondir, ppt_list):
     """Path of a --var-list-file that traces only the globals some traced
     function touches directly, and none of the harness's statics.
@@ -445,7 +467,7 @@ def write_var_list(kv_exe, workdir, daikondir, ppt_list):
             vars_ = [g for g in vars_ if _global_base(g) in used
                      and not ("@" in g and dtrace.DEFAULT_OMIT.search(
                          ".%s()" % g.rsplit("@", 1)[1].split("/")[0]))]
-        parts.append("----SECTION----\n%s\n%s\n" % (name, "\n".join(vars_)))
+        parts.append("----SECTION----\n%s\n%s\n" % (name, "\n".join(_with_parents(vars_))))
     path = os.path.join(workdir, "trace.vars")
     with open(path, "w") as f:
         f.write("\n".join(parts))

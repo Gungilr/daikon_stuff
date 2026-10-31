@@ -331,3 +331,11 @@ def test_own_sources_include_files_the_target_includes(tmp_path):
     (top / "arith.c").write_text("")
     (top / "buffer.c").write_text("")
     assert runner.own_sources(str(top / "arith.c")) == ("arith.c",)
+
+
+def test_var_list_adds_the_parents_kvasir_needs():
+    """Kvasir's own dump omits `p[]` and `p[0]`; read back without them it
+    declares fields with no enclosing variable and Daikon rejects the file."""
+    from fuzzloop import runner
+    got = runner._with_parents(["s", "s[].a", "t", "t[].c->d", "t[].c->e"])
+    assert got == ["s", "s[]", "s[].a", "t", "t[]", "t[].c[0]", "t[].c->d", "t[].c->e"]

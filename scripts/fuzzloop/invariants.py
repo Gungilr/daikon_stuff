@@ -20,6 +20,7 @@ for anything it does not understand rather than guessing.
 Pure: no subprocesses, no third-party imports.
 """
 import math
+from itertools import repeat
 import re
 
 from .dtrace import parse_value
@@ -499,22 +500,17 @@ class _Recorder(object):
 
 _ABSENT = object()
 _MEMO_MAX = 4096
-
-
-def _memo_part(v):
-    # Arrays are compared by identity: dtrace.rows() hands out one shared
-    # list per distinct raw value, so a 360-entry global table is one object
-    # for every call that saw it unchanged. Scalars compare by value.
-    return id(v) if isinstance(v, list) else v
+_MEMO_PROBE = 256
 
 
 class Invariant(object):
-    __slots__ = ("ppt", "text", "_pred", "_names", "_memo")
+    __slots__ = ("ppt", "text", "_pred", "_names", "_memo", "_calls", "_hits")
 
     def __init__(self, ppt, text, pred):
         self.ppt, self.text, self._pred = ppt, text, pred
         self._names = ()
         self._memo = {}
+        self._calls = self._hits = 0
 
     @property
     def key(self):
@@ -528,25 +524,37 @@ class Invariant(object):
         same on every call, and re-scanning them was 97% of the loop's time.
         Exact, not approximate: a hit means every variable this invariant has
         ever read has the same value as in an earlier evaluation.
+
+        The memo pays only when values repeat. Building its key costs about
+        as much as a simple comparison, so a rule whose first _MEMO_PROBE
+        checks hit less than half the time stops memoizing.
         """
-        vals = tuple(row.get(n, _ABSENT) for n in self._names)
-        key = tuple(_memo_part(v) for v in vals)
-        hit = self._memo.get(key)
+        memo = self._memo
+        if memo is None:
+            return self._check(row)
+        vals = tuple(map(row.get, self._names, repeat(_ABSENT)))
+        key = tuple([id(v) if type(v) is list else v for v in vals])
+        self._calls += 1
+        hit = memo.get(key)
         if hit is not None:
+            self._hits += 1
             return hit[1]
+        if self._calls == _MEMO_PROBE and self._hits * 2 < _MEMO_PROBE:
+            self._memo = None
+            return self._check(row)
         rec = _Recorder(row)
         res = self._check(rec)
         if not rec.seen.issubset(self._names):
             # Read something new (an implication's consequent, say): widen
             # the key and forget entries keyed on the narrower one.
             self._names = tuple(sorted(set(self._names) | rec.seen))
-            self._memo = {}
-            vals = tuple(row.get(n, _ABSENT) for n in self._names)
-            key = tuple(_memo_part(v) for v in vals)
-        if len(self._memo) >= _MEMO_MAX:
-            self._memo = {}
+            memo = self._memo = {}
+            vals = tuple(map(row.get, self._names, repeat(_ABSENT)))
+            key = tuple([id(v) if type(v) is list else v for v in vals])
+        if len(memo) >= _MEMO_MAX:
+            memo = self._memo = {}
         # Keep vals alive with the entry so no id() in the key is reused.
-        self._memo[key] = (vals, res)
+        memo[key] = (vals, res)
         return res
 
     def _check(self, row):

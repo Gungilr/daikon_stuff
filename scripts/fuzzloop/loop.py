@@ -495,12 +495,28 @@ class FuzzLoop(object):
         self.t0 = time.time()
         self.log("[+] target  %s" % self.target_c)
         self.log("[+] seeds   %d" % len(seeds))
-        for data, feats, samples in self._execute(seeds, trace_all=True):
-            self.seen_inputs.add(data)
-            self._consider(data, feats, samples, 0, force=True)
-        if not self.corpus:
-            raise runner.ToolError("no seed ran cleanly; nothing to infer from")
-        report, _ = self._infer(0)
+        report = None
+        while report is None:
+            for data, feats, samples in self._execute(seeds, trace_all=True):
+                self.seen_inputs.add(data)
+                self._consider(data, feats, samples, 0, force=True)
+            if not self.corpus:
+                raise runner.ToolError("no seed ran cleanly; nothing to infer from")
+            try:
+                report, _ = self._infer(0)
+            except runner.ToolError as e:
+                if self.var_list is None:
+                    raise
+                # A Kvasir variable-list quirk once produced declarations
+                # Daikon rejected, and the run died with no results. Fall
+                # back to tracing everything rather than losing the run.
+                self.log("[!] Daikon rejected the traces made with a variable list; "
+                         "tracing every variable instead (%s)"
+                         % str(e).strip().splitlines()[-1][:200])
+                self.var_list = None
+                self.decls = None
+                self.corpus, self.seen_inputs, self.seen_features = [], set(), set()
+                self.best, self.violated = {}, {}
         # Baseline distances over the seeds, so "closer" in round 1 means
         # closer than the seeds got, not merely "measured for the first time".
         self._update_min_distances()
