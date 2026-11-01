@@ -252,6 +252,15 @@ def afl_inputs(outdir, sub):
     return out
 
 
+def ppt_function(ppt):
+    """Bare function name of a Daikon program point. Kvasir writes globals as
+    `..f()` and file-static functions as `/path/to/file.c.f()`."""
+    name = ppt.split("(")[0]
+    if "/" in name:
+        name = re.sub(r"^.*\.(?:c|h)\.", "", name)
+    return name.lstrip(".")
+
+
 def score_run(tool, target, outdir, oracles, san, planted, workdir, budget=None):
     trig, rep, funcs = {}, {}, {}
     own = runner.own_sources(target_src(target))
@@ -302,7 +311,7 @@ def score_run(tool, target, outdir, oracles, san, planted, workdir, budget=None)
         for e, (ids, fn) in zip(entries, kept_t):
             if e["round"] == 0:
                 continue
-            vf = {k[0].split("(")[0].lstrip(".") for k in e.get("violates", [])}
+            vf = {ppt_function(k[0]) for k in e.get("violates", [])}
             if not vf:
                 continue
             alarms += 1

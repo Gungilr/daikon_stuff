@@ -453,3 +453,16 @@ def test_run_daikon_does_not_retry_other_failures(monkeypatch, tmp_path):
     with pytest.raises(runner.ToolError):
         runner.run_daikon("a.decls", "a.dtrace", str(tmp_path), str(tmp_path))
     assert len(calls) == 1
+
+
+def test_bench_maps_static_function_ppts_to_their_bare_name():
+    # Kvasir names file-static functions after their file. The benchmark
+    # once compared those names verbatim, so a rule broken in a static
+    # function (all of print_tokens2's planted bugs) never counted.
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "bench"))
+    import bench
+    assert bench.ppt_function("..get_char():::ENTER") == "get_char"
+    assert bench.ppt_function("/home/u/t/print_tokens2.c.is_token_end():::EXIT0") == "is_token_end"
+    assert bench.ppt_function("main():::EXIT") == "main"
