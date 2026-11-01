@@ -95,13 +95,24 @@ def planted_bugs(target):
 
 # --- running ----------------------------------------------------------------
 
+SEED_VARIANT = None     # --seed-variant: use <name>.<variant>.seeds
+
+
+def seed_file(target):
+    base = os.path.splitext(target_src(target))[0]
+    if SEED_VARIANT:
+        return "%s.%s.seeds" % (base, SEED_VARIANT)
+    return base + ".seeds"
+
+
 def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20,
              trace_sample=1.0, batch_size=1000, guidance=True):
     cmd = [sys.executable, os.path.join(REPO, "scripts", "fuzz_loop.py"),
            target_src(target), "-o", outdir,
            "--rounds", "100000", "--patience", "100000", "--time-limit", str(budget),
            "--batch-size", str(batch_size), "--seed", str(seed), "--max-len", str(max_len),
-           "--call-budget", str(call_budget), "--trace-sample", str(trace_sample)]
+           "--call-budget", str(call_budget), "--trace-sample", str(trace_sample),
+           "--seeds", seed_file(target)]
     if learn_once:
         cmd.append("--learn-once")
     if not guidance:
@@ -129,7 +140,7 @@ def run_afl(target, outdir, seed, budget, bins):
     main, cmplog = bins
     seeds_dir = outdir + ".in"
     os.makedirs(seeds_dir, exist_ok=True)
-    with open(os.path.splitext(target_src(target))[0] + ".seeds") as f:
+    with open(seed_file(target)) as f:
         for i, s in enumerate(parse_seed_file(f.read())):
             with open(os.path.join(seeds_dir, "seed%02d" % i), "wb") as g:
                 g.write(s)
@@ -307,6 +318,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--budget", type=int, default=180, help="seconds per run")
     ap.add_argument("--seeds", type=int, default=3, help="random seeds per cell")
+    ap.add_argument("--seed-variant", default=None,
+                    help="start every tool from <name>.<variant>.seeds instead of "
+                         "<name>.seeds (e.g. 'weak': one ordinary input)")
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--targets", default=",".join(TARGETS))
     ap.add_argument("--tools", default=",".join(TOOLS))
@@ -324,6 +338,8 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true",
                     help="skip runs that already finished (they leave a .done file)")
     args = ap.parse_args(argv)
+    global SEED_VARIANT
+    SEED_VARIANT = args.seed_variant
     targets, tools = args.targets.split(","), args.tools.split(",")
     os.environ.setdefault("DAIKONDIR", os.path.join(REPO, "daikon"))
 
