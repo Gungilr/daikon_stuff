@@ -23,7 +23,7 @@ import random
 import subprocess
 import time
 
-from . import dtrace, invariants, runner
+from . import attack, dtrace, invariants, runner
 from .mutate import Mutator, parse_seed_file
 
 
@@ -105,7 +105,8 @@ class FuzzLoop(object):
                  max_len=64, keep_is_param=False, conf_limit=0.0,
                  daikon_args=(), guidance=True, coverage=True,
                  frontend="kvasir", tier=7, bug_check=True, learn_once=False,
-                 time_limit=None, call_budget=0, trace_sample=1.0, log=print):
+                 time_limit=None, call_budget=0, trace_sample=1.0, attack=0.0,
+                 log=print):
         self.target_c = os.path.abspath(target_c)
         self.out = os.path.abspath(out_dir)
         self.work = os.path.join(self.out, "work")
@@ -122,6 +123,11 @@ class FuzzLoop(object):
         # whose corpus Daikon re-reads, with invariants steering nothing.
         self.guidance = guidance
         self.alarms = []        # rule-breaking inputs not kept (no guidance)
+        # Fraction of candidates made by rule-directed mutation (attack.py):
+        # a live rule's boundary written into the input field it reads.
+        self.attack = attack if guidance else 0.0
+        self._attack_inputs = set()
+        self._rows_cache = {}
         # False gives the opposite ablation: invariants are the only metric,
         # and new coverage alone never keeps an input.
         self.coverage = coverage
@@ -370,6 +376,8 @@ class FuzzLoop(object):
                 for k in violations:
                     self.violated[k] = data.hex()
             return None
+        if data in self._attack_inputs:
+            self.stats["attack_kept"] = self.stats.get("attack_kept", 0) + 1
         for kind, hit in (("bug", data in self._bug_inputs),
                           ("coverage", new_feats), ("violation", violations),
                           ("closer", progress and not force)):
@@ -393,6 +401,35 @@ class FuzzLoop(object):
             if d == 0 and k not in self.violated:
                 self.violated[k] = data.hex()
         return entry.reason
+
+    def _attack_children(self, parent, tries=4):
+        """Children of `parent` with one live rule's boundary written into
+        the bytes its variable came from (attack.py), or []."""
+        if not parent.samples:
+            return []
+        key = (id(parent), id(parent.samples))
+        rows = self._rows_cache.get(key)
+        if rows is None:
+            rows = [(ppt, row) for ppt, row in dtrace.rows(parent.samples)
+                    if any(rp in self.compiled for rp in invariants.report_ppts_for(ppt))]
+            if len(self._rows_cache) > 4096:
+                self._rows_cache.clear()
+            self._rows_cache[key] = rows
+        if not rows:
+            return []
+        for _ in range(tries):
+            ppt, row = self.rng.choice(rows)
+            rules = [inv for rp in invariants.report_ppts_for(ppt)
+                     for inv in self.compiled.get(rp, ())]
+            if not rules:
+                continue
+            kids = attack.children(parent.data, self.rng.choice(rules).text, row,
+                                   self.rng)
+            kids = [k[:self.mutator.max_len] for k in kids]
+            if kids:
+                self.stats["attack_cands"] = self.stats.get("attack_cands", 0) + len(kids)
+                return kids
+        return []
 
     def _pick_parent(self):
         # Inputs closest to violating a live invariant get most of the
@@ -553,10 +590,23 @@ class FuzzLoop(object):
                 if self._out_of_time():
                     break
                 cands = []
+                n_attack = 0
                 tries = 0
                 while len(cands) < self.batch_size and tries < self.batch_size * 20:
                     tries += 1
                     parent = self._pick_parent()
+                    # Keep rule-directed children at `attack` of the batch
+                    # (one call can give up to three).
+                    if self.attack and n_attack < self.attack * (len(cands) + 1):
+                        kids = self._attack_children(parent)
+                        if kids:
+                            for child in kids:
+                                if child not in self.seen_inputs:
+                                    self.seen_inputs.add(child)
+                                    self._attack_inputs.add(child)
+                                    cands.append(child)
+                                    n_attack += 1
+                            continue
                     other = self.rng.choice(self.corpus).data
                     child = self.mutator.mutate(parent.data, other)
                     if child in self.seen_inputs:

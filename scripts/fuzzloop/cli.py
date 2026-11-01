@@ -58,6 +58,9 @@ def main(argv=None):
     ap.add_argument("--trace-sample", type=float, default=1.0,
                     help="fraction of inputs without new coverage to trace with Kvasir "
                          "and check against the invariants (1.0 = all)")
+    ap.add_argument("--attack", type=float, default=0.0,
+                    help="fraction of candidates made by writing a live rule's "
+                         "boundary value into the input field it reads (0 = off)")
     ap.add_argument("--call-budget", type=int, default=0,
                     help="source mode: do not trace functions averaging more than "
                          "this many calls per seed input (0 = trace all). Kvasir "
@@ -82,6 +85,7 @@ def main(argv=None):
                     coverage=not args.no_coverage, frontend=args.frontend,
                     tier=args.tier, bug_check=not args.no_bug_check,
                     learn_once=args.learn_once, time_limit=args.time_limit,
+                    attack=args.attack,
                     call_budget=args.call_budget, trace_sample=args.trace_sample)
     try:
         loop.run()

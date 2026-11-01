@@ -396,3 +396,29 @@ __attribute__((noinline)) void fuzz_target(const uint8_t *d, size_t n) {
     assert calls <= 3
     if calls < 3:
         assert p.returncode != 0
+
+
+def test_attack_writes_a_constant_boundary_into_a_binary_field():
+    from fuzzloop import attack
+    data = struct.pack("<iii", 7, 958, 3)
+    kids = attack.children(data, "alt <= 1000", {"alt": 958}, random.Random(0))
+    vals = sorted(struct.unpack("<iii", k)[1] for k in kids)
+    assert vals == [999, 1000, 1001]
+    assert all(struct.unpack("<iii", k)[0::2] == (7, 3) for k in kids)
+
+
+def test_attack_uses_the_other_variable_and_decimal_text():
+    from fuzzloop import attack
+    data = b"12 40\n"
+    kids = attack.children(data, "a < b", {"a": 12, "b": 40}, random.Random(1))
+    assert kids and all(k.endswith(b" 40\n") or k.startswith(b"12 ") for k in kids)
+    got = {k for k in kids}
+    assert got <= {b"39 40\n", b"40 40\n", b"41 40\n", b"12 11\n", b"12 12\n", b"12 13\n"}
+
+
+def test_attack_gives_nothing_without_a_handle():
+    from fuzzloop import attack
+    rng = random.Random(0)
+    assert attack.children(b"abc", "x <= 5", {"x": 900}, rng) == []      # not in input
+    assert attack.children(b"\x05", "size(a[]) > 0", {}, rng) == []      # not simple
+    assert attack.children(b"\x05", "x == y", {"x": 5}, rng) == []       # y unknown

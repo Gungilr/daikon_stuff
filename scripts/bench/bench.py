@@ -59,7 +59,9 @@ from fuzzloop.mutate import pack_batch, parse_seed_file   # noqa: E402
 TARGETS = ["arith", "buffer", "packet", "stack", "stats"]
 TOOLS = ["loop", "learn-once", "afl"]
 # Also available: "no-guidance", the loop with invariants steering nothing
-# (they still raise alarms), to isolate what the steering is worth.
+# (they still raise alarms), to isolate what the steering is worth; and
+# "attack", the loop with a quarter of its candidates made by writing live
+# rules' boundary values into the input (scripts/fuzzloop/attack.py).
 AFL = os.path.join(REPO, "AFLplusplus")
 _PLANT = re.compile(r'(FUZZ_BUG_FATAL|FUZZ_BUG|FAULT)\("(\w+)"(?:,\s*(\d+))?')
 
@@ -106,7 +108,7 @@ def seed_file(target):
 
 
 def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20,
-             trace_sample=1.0, batch_size=1000, guidance=True):
+             trace_sample=1.0, batch_size=1000, guidance=True, attack=0.0):
     cmd = [sys.executable, os.path.join(REPO, "scripts", "fuzz_loop.py"),
            target_src(target), "-o", outdir,
            "--rounds", "100000", "--patience", "100000", "--time-limit", str(budget),
@@ -117,6 +119,8 @@ def run_loop(target, outdir, seed, budget, learn_once, max_len, call_budget=20,
         cmd.append("--learn-once")
     if not guidance:
         cmd.append("--no-guidance")
+    if attack:
+        cmd += ["--attack", str(attack)]
     with open(outdir + ".log", "w") as log:
         subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=REPO,
                        timeout=budget * 3 + 900)
@@ -365,7 +369,8 @@ def main(argv=None):
                 else:
                     run_loop(t, od, s, args.budget, tool == "learn-once", args.max_len,
                              args.call_budget, args.trace_sample, args.batch_size,
-                             guidance=tool != "no-guidance")
+                             guidance=tool != "no-guidance",
+                             attack=0.25 if tool == "attack" else 0.0)
             except subprocess.TimeoutExpired:
                 note = "  KILLED (ran past 3x budget)"     # scored on what it kept
             open(od + ".done", "w").close()
