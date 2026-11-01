@@ -422,3 +422,34 @@ def test_attack_gives_nothing_without_a_handle():
     assert attack.children(b"abc", "x <= 5", {"x": 900}, rng) == []      # not in input
     assert attack.children(b"\x05", "size(a[]) > 0", {}, rng) == []      # not simple
     assert attack.children(b"\x05", "x == y", {"x": 5}, rng) == []       # y unknown
+
+
+def test_run_daikon_retries_without_linear_ternary_on_its_internal_error(monkeypatch, tmp_path):
+    from fuzzloop import runner
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise runner.ToolError("java failed (1):\nError at line 9: at end of add_modified")
+        return runner.subprocess.CompletedProcess(cmd, 0, b"report", b"")
+
+    monkeypatch.setattr(runner, "_run", fake_run)
+    assert runner.run_daikon("a.decls", "a.dtrace", str(tmp_path), str(tmp_path)) == "report"
+    assert len(calls) == 2
+    assert "daikon.inv.ternary.threeScalar.LinearTernary.enabled=false" in calls[1]
+    assert calls[1][-2:] == ["a.decls", "a.dtrace"]
+
+
+def test_run_daikon_does_not_retry_other_failures(monkeypatch, tmp_path):
+    from fuzzloop import runner
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        raise runner.ToolError("java failed (1):\nOutOfMemoryError")
+
+    monkeypatch.setattr(runner, "_run", fake_run)
+    with pytest.raises(runner.ToolError):
+        runner.run_daikon("a.decls", "a.dtrace", str(tmp_path), str(tmp_path))
+    assert len(calls) == 1

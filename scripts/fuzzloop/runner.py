@@ -574,10 +574,24 @@ def run_daikon(decls_path, dtrace_path, workdir, daikondir, conf_limit=None,
     """Daikon's text report for one decls + dtrace pair."""
     inv_gz = os.path.join(workdir, "daikon.inv.gz")
     conf = [] if conf_limit is None else ["--conf_limit", str(conf_limit)]
-    p = _run(["java", "-cp", daikon_jar(daikondir), "daikon.Daikon"] + conf
-             + list(extra_args) + ["-o", inv_gz, decls_path, dtrace_path],
-             cwd=workdir, timeout=timeout)
+    cmd = (["java", "-cp", daikon_jar(daikondir), "daikon.Daikon"] + conf
+           + list(extra_args) + ["-o", inv_gz, decls_path, dtrace_path])
+    try:
+        p = _run(cmd, cwd=workdir, timeout=timeout)
+    except ToolError as e:
+        # Daikon 5.9's plane-fitting invariant (a*x + b*y + c*z = d) can hit
+        # an internal "should never get here" on extreme values that lose
+        # precision as doubles. Drop that one invariant and try once more.
+        if "at end of add_modified" not in str(e):
+            raise
+        p = _run(cmd[:4] + _NO_LINEAR_TERNARY + cmd[4:], cwd=workdir, timeout=timeout)
     return p.stdout.decode(errors="replace")
+
+
+_NO_LINEAR_TERNARY = [
+    "--config_option", "daikon.inv.ternary.threeScalar.LinearTernary.enabled=false",
+    "--config_option", "daikon.inv.ternary.threeScalar.LinearTernaryFloat.enabled=false",
+]
 
 
 def check_tools(daikondir, frontend="kvasir"):
