@@ -458,3 +458,129 @@ Per bug, reported/triggered runs out of 3 (only bugs where the two differ):
   no-guidance runs also executed fewer inputs (34k vs 54k median), which
   flatters guidance there. The tcas result (equal executions) is the
   cleanest evidence.
+
+# Correction: rules broken in `static` functions were not counted
+
+Kvasir names a file-static function's program point after its file
+(`/path/print_tokens2.c.is_token_end()`). The scorer compared that to the
+bug's bare function name, so a live rule broken in a static function never
+counted as reporting the bug. Fixed in `bench.py` (`ppt_function`), and the
+runs above were rescored from their saved histories (nothing re-run).
+Triggered counts are unchanged; reported counts move only on print_tokens'
+`pt_delim_or`:
+
+| run | tool | reported before | reported after | alarm precision after |
+|---|---|---|---|---|
+| speed fixes (`ext`) | loop / learn-once | 50 / 51 | 50 / 51 | 65/3033, 66/3065 |
+| + sampling (`ext-fast01`) | loop | 56 | **57** | 59/3233 (1.8%) |
+| + sampling (`ext-fast01`) | learn-once | 54 | **57** | 105/4431 (2.4%) |
+| ablation (`ext-guid`) | no-guidance | 51 | **52** | 71/3202 |
+
+The guidance conclusion stands (57 vs 52). Loop and learn-once are now
+level on normal seeds (57 each).
+
+# Weak seeds: one ordinary input per target
+
+Question: with the usual 4-14 seeds, the first rules are already good, so
+re-learning (the loop) has nothing to fix. Does it pull ahead of learn-once
+when the starting rules are poor? Each target got a single ordinary input
+(`*.weak.seeds`; on Juliet it reaches 1 of the 14 cases). Same settings as
+above, 180 s, 3 seeds, scored with the corrected scorer.
+
+| tool | triggered | reported | memory/UB | logic | alarm precision | median executions |
+|---|---|---|---|---|---|---|
+| loop | **71/99** | 62/99 | 30 | 32 | 153/3426 (4.5%) | 45,001 |
+| learn-once | 64/99 | **64/99** | 30 | **34** | 405/5126 (7.9%) | 95,001 |
+| no-guidance | 66/99 | 62/99 | 30 | 32 | 153/3479 (4.4%) | 44,501 |
+| attack (below) | **71/99** | 63/99 | 30 | 33 | 145/3534 (4.1%) | 46,001 |
+| AFL++ | 64/99 | 52/99 | 30 | 22 | – | 377,595 |
+
+Bugs where the tools differ (reported/triggered runs out of 3):
+
+| bug | loop | learn-once | no-guidance | attack | AFL++ |
+|---|---|---|---|---|---|
+| tcas_enabled_ge | 3/3 | 1/1 | 3/3 | 3/3 | 0/0 |
+| tot_pi_ge | 0/1 | 0/0 | 0/1 | 0/2 | 0/2 |
+| rep_subline_gt | 2/3 | 3/3 | 3/3 | 3/3 | 0/3 |
+| pt_token_len | 0/0 | 0/0 | 0/0 | 0/0 | 3/3 |
+| pt2_tokend_semi | 2/3 | 3/3 | 2/3 | 1/3 | 1/3 |
+| pt2_num_dot | 0/0 | 2/2 | 0/1 | 1/3 | 0/1 |
+| j197_char / j197_short | 0/6 | 0/0 | 0/0 | 0/2 | 0/0 |
+
+## What it shows
+
+- **Weak seeds barely hurt anyone.** Triggered: loop 78 -> 71, learn-once
+  70 -> 64, AFL++ 62 -> 64. One input is enough to reach most planted bugs
+  within seconds; the 6 bugs no tool triggers are the same with either seed
+  set. The targets are easy where they are solved and hard, in a way
+  invariants do not touch, where they are not (below).
+- **Re-learning still does not pay.** Loop 62 vs learn-once 64 reported.
+  The loop's triggered lead (+7) is again mostly Juliet j197 (6 runs), which
+  neither can report (the truncation is in a local).
+- **Reported went up, not down (57 -> 62-64).** One seed gives fewer rules
+  (10.8k vs 14.7k in round 0), and many are accidents of that one input
+  (`x == 958`). Almost any new behaviour breaks them, so bug inputs get
+  flagged more often, and so do correct ones. Learn-once keeps those narrow
+  rules all run (hence 5,126 alarms); the loop retires them. "Reported" for
+  logic bugs is a suspect flag, so this is cheaper flagging, not better
+  detection.
+- **Guidance is neutral here** (62 vs 62), unlike on normal seeds (57 vs 52).
+
+## The bugs nobody triggers
+
+| bug | what it needs |
+|---|---|
+| j190_add / j191_sub | the text `2147483647` / `-2147483648` exactly |
+| tot_lgamma_terms, tot_qgamma_le | numeric series behaviour reached only by specific real inputs |
+| rep_dash_lt, pt_unget_le | particular syntax sequences (a `-` range at a class edge; an unget at the buffer end) |
+
+None of these is a boundary near a value the rules have seen, so neither
+re-learning nor rule-directed mutation reaches them. Type-extreme values
+(INT_MAX/INT_MIN in the input's own encoding) and grammar-aware mutation
+would.
+
+# Rule-directed mutation (`--attack`)
+
+`--attack F` spends about F of each batch on children built from a live
+rule. It finds the rule's variable value in the parent's bytes (LE
+32/16/8-bit or decimal text) and writes in the boundary: c-1, c, c+1 for
+`x op c`, or y-1, y, y+1 for `x op y` (REDQUEEN-style input-to-state, driven
+by rules instead of comparison operands). Benchmarked at 0.25 (about 36% of
+candidates, since a rule yields up to 3 children).
+
+| seeds | loop | attack | AFL++ |
+|---|---|---|---|
+| normal: triggered / reported | 78 / 57 | 73 / 55 | 62 / 47 |
+| weak: triggered / reported | 71 / 62 | 71 / 63 | 64 / 52 |
+
+No gain on either seed set. Normal seeds: attack lost tcas_above_le (loop
+2/3 triggered, attack 0/3) and was slower on tcas_enabled_ge (median 42 s vs
+12 s).
+
+Why, traced on tcas_above_le (`Other_Tracked_Alt <= Own_Tracked_Alt`
+where the correct code has `<`):
+
+- The right rule exists from round 0: `::Own_Tracked_Alt !=
+  ::Other_Tracked_Alt`. Attacking it on the 12 seeds gives 24 inputs with
+  equal altitudes, and **4 of 24 trigger the bug**. The bug also needs the
+  right branch elsewhere in the input.
+- It is 2 of ~70 attackable rules at its program point (out of ~170), so 1
+  pick in ~35. Most of the rest are accidents
+  (`High_Confidence < Own_Tracked_Alt`, `Own_Tracked_Alt > Climb_Inhibit`).
+- **The loop deletes the rule after the first hit.** The first
+  equal-altitude input is kept (it breaks a live rule), the next Daikon round
+  learns that equality happens, and `!=` is gone. One shot at ~1 in 6.
+- Generation is repetitive: about 65k attack children per tcas run for about
+  14k distinct ones executed.
+
+What would make it work: keep a broken rule as an attack target after it is
+refuted (or attack against learn-once rules), favour rules between input
+variables over rules involving constants and flags, and add type extremes
+(INT_MAX/INT_MIN) for the Juliet overflows.
+
+## Tool bugs found while running it
+
+- **Daikon 5.9's `LinearTernary` crashed** ("at end of add_modified") on a
+  tot_info value of 39,999,999,999,999,990, killing one run's final pass.
+  `run_daikon` now retries once with that invariant off.
+- **The static-function scoring bug** above.
