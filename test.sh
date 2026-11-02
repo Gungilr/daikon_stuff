@@ -93,8 +93,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ! "$TIER" =~ ^[0-9]$ ]]; then
-    echo "[!] --tier must be 0-9 (got: $TIER)" >&2; exit 2
+if [[ ! "$TIER" =~ ^([0-9]|10)$ ]]; then
+    echo "[!] --tier must be 0-10 (got: $TIER)" >&2; exit 2
 fi
 for a in ${TRACER_ARGS+"${TRACER_ARGS[@]}"}; do
     if [[ "$a" == "--tier" || "$a" == --tier=* ]]; then

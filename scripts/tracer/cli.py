@@ -102,8 +102,8 @@ def build_parser():
     # unrelated meanings is a standing trap. Tier selects how much semantic
     # recovery the tracer attempts; layouts selects how many times it runs.
     heur = p.add_argument_group("heuristics")
-    heur.add_argument("--tier", type=int, default=0, choices=range(0, 10),
-                      metavar="0-9",
+    heur.add_argument("--tier", type=int, default=0, choices=range(0, 11),
+                      metavar="0-10",
                       help="Semantic-recovery tier (default: 0). Each tier is "
                            "cumulative and opt-in, so lower tiers keep producing "
                            "byte-identical output. "
@@ -125,7 +125,11 @@ def build_parser():
                            "own test suite. "
                            "9 = floating-point arguments and returns "
                            "(xmm0-xmm7), without which a function taking "
-                           "only floats looks nullary.")
+                           "only floats looks nullary. "
+                           "10 = object model: every access is attributed to "
+                           "the heap block, global or stack frame it hits; "
+                           "layouts pool per allocation site; one typed walk "
+                           "from every root to --deref-depth.")
     heur.add_argument("--detect-void", action="store_true",
                       help="Tier 3+: omit `return` for functions whose callers "
                            "never read rax afterwards. Behind a flag so its "
@@ -188,6 +192,29 @@ def build_parser():
                            "structs, because a statically-initialised struct is "
                            "never written at run time and so leaves no width "
                            "evidence to be heterogeneous. Do not enable.")
+
+    heur.add_argument("--deref-depth", type=int, default=2, metavar="N",
+                      help="Tier 10: how many pointer hops the typed walk "
+                           "follows from each root (default 2, which covers "
+                           "88%% of Kvasir's facts on its own suite).")
+    heur.add_argument("--dump-layouts", metavar="PATH",
+                      help="Tier 10: write the recovered per-site types and "
+                           "root types as JSON, for layout scoring.")
+    heur.add_argument("--no-walk-globals", action="store_true",
+                      help="Tier 10: keep tier-8 global shapes; walk only "
+                           "arguments and return values.")
+    heur.add_argument("--shadow", action="store_true",
+                      help="Tier 10: per-byte shadow memory (allocated / "
+                           "initialised), Kvasir-style: a field never written "
+                           "reads as nonsensical, exactly.")
+    heur.add_argument("--fault-on-unmapped", action="store_true",
+                      help="Stop emulation on an access to unmapped memory "
+                           "instead of silently mapping a zero page.")
+    heur.add_argument("--static-layouts", metavar="PATH",
+                      help="Tier 10: JSON of statically observed field offsets "
+                           "(scripts/rea_eval/static_layouts.py). Adds fields "
+                           "only to struct types the run already established, "
+                           "and never one that contradicts a run-time access.")
 
     heur.add_argument("--poison-uninitialized", action="store_true",
                       help="Tier 6+: fill fresh stack pages and heap allocations "

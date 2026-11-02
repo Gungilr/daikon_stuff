@@ -48,12 +48,12 @@ def test_tier_accepts_valid_values(tier):
 
 def test_tier_rejects_out_of_range():
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["b.exe", "--tier", "10"])
+        build_parser().parse_args(["b.exe", "--tier", "11"])
 
 
 def test_the_highest_tier_is_accepted():
     """Bumped with each new tier, deliberately: the range is the contract."""
-    assert build_parser().parse_args(["b.exe", "--tier", "9"]).tier == 9
+    assert build_parser().parse_args(["b.exe", "--tier", "10"]).tier == 10
 
 
 def test_percent_signs_in_help_are_escaped():

@@ -147,6 +147,137 @@ def dwarf_names(elf_path):
     return params, fields
 
 
+_QUAL = ("DW_TAG_typedef", "DW_TAG_const_type", "DW_TAG_volatile_type",
+         "DW_TAG_restrict_type")
+
+
+def _die_type(die):
+    if "DW_AT_type" not in die.attributes:
+        return None
+    try:
+        return die.get_DIE_from_attribute("DW_AT_type")
+    except Exception:
+        return None
+
+
+def _strip_q(die):
+    for _ in range(32):
+        if die is None or die.tag not in _QUAL:
+            return die
+        die = _die_type(die)
+    return die
+
+
+def _pointee_struct(die):
+    """The struct/union a pointer type points at, else None."""
+    d = _strip_q(die)
+    if d is None or d.tag != "DW_TAG_pointer_type":
+        return None
+    t = _strip_q(_die_type(d))
+    return t if t is not None and t.tag in ("DW_TAG_structure_type",
+                                            "DW_TAG_union_type") else None
+
+
+def _flat_fields(sdie, base=0, prefix="", depth=0):
+    """(absolute offset, dotted name, type DIE) for every member, flattening
+    embedded structs the way Kvasir names them (`.b.a`). The innermost member
+    at an offset wins, because the tracer reports the scalar it observed."""
+    out = []
+    if depth > 6:
+        return out
+    for m in sdie.iter_children():
+        if m.tag != "DW_TAG_member":
+            continue
+        nm = m.attributes.get("DW_AT_name")
+        loc = m.attributes.get("DW_AT_data_member_location")
+        off = loc.value if loc is not None and isinstance(loc.value, int) else 0
+        name = prefix + (nm.value.decode() if nm else "")
+        t = _strip_q(_die_type(m))
+        if t is not None and t.tag in ("DW_TAG_structure_type", "DW_TAG_union_type") \
+                and not t.attributes.get("DW_AT_declaration"):
+            inner = _flat_fields(t, base + off, name + ".", depth + 1)
+            if inner:
+                out.extend(inner)
+                continue
+        out.append((base + off, name, _die_type(m)))
+    return out
+
+
+def _field_entries(tr_prefix, kv_prefix, sdie, depth=0, seen=()):
+    """Tracer name -> Kvasir name for the fields of sdie, and through pointer
+    fields to further structs: `P.off8->off0` -> `K.next->val`."""
+    out = {}
+    if depth > 3 or sdie.offset in seen:
+        return out
+    taken = set()
+    for off, name, t in sorted(_flat_fields(sdie), key=lambda x: (x[0], -len(x[1]))):
+        if off in taken:
+            continue
+        taken.add(off)
+        tk, kk = f"{tr_prefix}.off{off}", f"{kv_prefix}.{name}"
+        out[tk] = kk
+        s2 = _pointee_struct(t) if t is not None else None
+        if s2 is not None:
+            sub = _field_entries(tk, kk, s2, depth + 1, seen + (sdie.offset,))
+            for k, v in sub.items():
+                # a pointer field's pointee fields are named with `->`
+                out[tk + "->" + k[len(tk) + 1:]] = kk + "->" + v[len(kk) + 1:]
+    return out
+
+
+def dwarf_deep_names(elf_path):
+    """({func: {tracer name: kvasir name}}, {tracer name: kvasir name})
+    for parameters, returns and globals, to any pointer depth (phase 11)."""
+    funcs, globs = {}, {}
+    with open(elf_path, "rb") as f:
+        elf = ELFFile(f)
+        if not elf.has_dwarf_info():
+            return funcs, globs
+        for cu in elf.get_dwarf_info().iter_CUs():
+            top = cu.get_top_DIE()
+            for die in top.iter_children():
+                if die.tag == "DW_TAG_variable":
+                    nm = die.attributes.get("DW_AT_name")
+                    loc = die.attributes.get("DW_AT_location")
+                    if not nm or not loc or not isinstance(loc.value, list) \
+                            or not loc.value or loc.value[0] != 0x03:
+                        continue
+                    addr = int.from_bytes(bytes(loc.value[1:9]), "little")
+                    g, gk = f"g_0x{addr:x}", f"::{nm.value.decode()}"
+                    t = _strip_q(_die_type(die))
+                    if t is not None and t.tag in ("DW_TAG_structure_type",
+                                                   "DW_TAG_union_type"):
+                        globs.update(_field_entries(g, gk, t))
+                    if t is not None and t.tag == "DW_TAG_array_type":
+                        e = _strip_q(_die_type(t))
+                        if e is not None and e.tag in ("DW_TAG_structure_type",
+                                                       "DW_TAG_union_type"):
+                            globs[f"{g}[]"] = f"{gk}[]"
+                            globs.update(_field_entries(f"{g}[]", f"{gk}[]", e))
+                    s = _pointee_struct(_die_type(die)) if t is not None else None
+                    if s is not None:
+                        globs[f"{g}[]"] = f"{gk}[]"
+                        globs.update(_field_entries(f"{g}[]", f"{gk}[]", s))
+                elif die.tag == "DW_TAG_subprogram":
+                    nm = die.attributes.get("DW_AT_name")
+                    if not nm:
+                        continue
+                    m = {}
+                    params = [c for c in die.iter_children()
+                              if c.tag == "DW_TAG_formal_parameter"]
+                    for i, prm in enumerate(params):
+                        pn = prm.attributes.get("DW_AT_name")
+                        pname = pn.value.decode() if pn else f"arg{i}"
+                        s = _pointee_struct(_die_type(prm))
+                        if s is not None:
+                            m.update(_field_entries(f"arg{i}[]", f"{pname}[]", s))
+                    s = _pointee_struct(die) if "DW_AT_type" in die.attributes else None
+                    if s is not None:
+                        m.update(_field_entries("return[]", "return[]", s))
+                    funcs[nm.value.decode()] = m
+    return funcs, globs
+
+
 def global_rename_map(globals_by_addr):
     """`g_0x404018` -> `::globalInt`, longest key first."""
     m = {}
@@ -464,13 +595,15 @@ def norm_ppt(name):
 def score(kvasir_path, tracer_path, binary):
     params, fields = dwarf_names(binary)
     gmap = global_rename_map(dwarf_globals(binary))
+    deep_funcs, deep_globs = dwarf_deep_names(binary)
+    gmap = {**deep_globs, **gmap}
     kv = {norm_ppt(k): v for k, v in parse_report(kvasir_path).items()}
     tr = {norm_ppt(k): v for k, v in parse_report(tracer_path).items()}
 
     rows, tot_m, tot_k, tot_t = [], 0, 0, 0
     for ppt in sorted(set(kv) | set(tr)):
         func = re.sub(r"^\.\.|\(\).*$", "", ppt)
-        mapping = rename_map(func, params, fields)
+        mapping = {**deep_funcs.get(func, {}), **rename_map(func, params, fields)}
         # Globals are renamed at every program point, since tier 8 reports them
         # everywhere Kvasir does. Merged AFTER the parameter map so the
         # longest-key-first ordering still holds across both.

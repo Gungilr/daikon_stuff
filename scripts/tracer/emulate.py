@@ -22,7 +22,7 @@ try:
         UC_HOOK_CODE,
         UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
         UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
-        UC_HOOK_MEM_FETCH_UNMAPPED,
+        UC_HOOK_MEM_FETCH_UNMAPPED, UC_MEM_WRITE,
     )
     from capstone.x86 import X86_OP_MEM, X86_OP_REG, X86_REG_RBP
     from unicorn.x86_const import (
@@ -55,6 +55,11 @@ from .memmap import NULL, POINTER, SCALAR, MemoryMap, classify_slot
 from .schema import (MAX_STACK_PROBE, NUM_STACK_ARG_SLOTS, REG_VARS_X64,
                      REG_VARS_X86)
 from .writer import NONSENSICAL, DaikonTraceWriter, VarSpec, legacy_specs
+from .objects import ObjectTable, HEAP, STACK
+from .shadow import ShadowMap
+from .layout import Evidence, INT as ACC_INT, SEXT as ACC_SEXT, ZEXT as ACC_ZEXT, SSE as ACC_SSE
+from .classify import classify_all, ARRAY as T_ARRAY
+from . import walk as walker
 
 # Allocator functions the tier-5 model intercepts. printf and friends stay
 # generically skipped - modelling output has no bearing on invariants.
@@ -229,6 +234,17 @@ class Tracer:
         self.cs = None
         self.var_names = []
         self.resolved_start_addr = None
+        # Tier 10 (phase 11): the object model. Every access is attributed to
+        # the object it hits; evidence pools per allocation site.
+        self.objects = ObjectTable()
+        self.evidence = Evidence()
+        self._insn_cls = {}         # pc -> access class (int / sext / zext / sse)
+        self.root_sites = {}        # (func, raw_index) -> Counter of pointee targets
+        self._types = {}            # site -> classify.TypeInfo, decided at finalize
+        self._root_type_cache = {}
+        self._data_ranges = []      # data sections, as [lo, hi)
+        self._rodata = None
+        self.shadow = None          # --shadow: heap definedness, per byte
 
     # ---- Filtering ----
     def _filter_functions(self, functions):
@@ -291,6 +307,18 @@ class Tracer:
         for seg in self.segments:
             self.memmap.add_region(seg['vaddr'], seg['memsz'], "image")
         self.memmap.add_region(stack_addr, stack_size, "stack")
+
+        if self._objects_enabled():
+            # Rebuilt per layout, like the memory map: heap blocks and frames
+            # belong to one run. The EVIDENCE persists across layouts.
+            self.objects = ObjectTable()
+            self.objects.set_stack(stack_addr, stack_addr + stack_size)
+            self.shadow = ShadowMap() if getattr(self.args, "shadow", False) else None
+            self._data_ranges = []
+            for name, addr, size in data_sections(self.args.binary):
+                self._data_ranges.append((addr, addr + size))
+                if name == ".rodata":
+                    self._rodata = (addr, addr + size)
 
         if self._globals_enabled() and not self.global_table._regions:
             # Section headers survive `strip --strip-all`, so these ranges are
@@ -380,6 +408,9 @@ class Tracer:
         else:
             return False
 
+        if self._objects_enabled():
+            self._note_allocation(name, address, arg0, result)
+
         if result == 0 and name in ("malloc", "calloc", "realloc"):
             self.log.verbose(f"  [!] {name} returned NULL (arena exhausted?)")
 
@@ -407,6 +438,389 @@ class Tracer:
         the oracle says, and emitting none of them capped recall at 4%.
         """
         return self.args.tier >= 8 and self.is_64bit
+
+    # ---- Tier 10: object model (phase 11) ----
+    def _objects_enabled(self):
+        """Tier 10+: attribute accesses to objects, pool layouts per site, and
+        emit one typed walk from every root (docs/plans/phase11.md)."""
+        return self.args.tier >= 10 and self.is_64bit
+
+    def _deref_depth(self):
+        return max(1, int(getattr(self.args, "deref_depth", 2) or 2))
+
+    def _note_allocation(self, name, call_pc, arg0, result):
+        """Register heap objects with their SITE: the allocating call's pc.
+        realloc keeps the site of the block it replaces - same type, new home."""
+        size = self.arena.size_of(result) if result else None
+        if self.shadow is not None and result:
+            if name in ("malloc", "calloc"):
+                self.shadow.allocate(result, size, defined=(name == "calloc"))
+            elif name == "realloc":
+                old = self.arena.size_of(arg0) if arg0 else None
+                self.shadow.reallocate(arg0, result, size,
+                                       min(old or 0, size or 0))
+        if name in ("malloc", "calloc") and result:
+            site = ("heap", call_pc)
+            self.objects.add(HEAP, result, size, site)
+            self.evidence.note_size(site, size)
+        elif name == "realloc":
+            old = self.objects.lookup(arg0) if arg0 else None
+            site = (old[0].site if old is not None and old[0].kind == HEAP
+                    else ("heap", call_pc))
+            if arg0 and result:
+                self.objects.kill(arg0)
+            if result:
+                self.objects.add(HEAP, result, size, site)
+                self.evidence.note_size(site, size)
+        elif name == "free" and arg0:
+            self.objects.kill(arg0)
+
+    def _in_data(self, addr):
+        for lo, hi in self._data_ranges:
+            if lo <= addr < hi:
+                return True
+        return False
+
+    def _insn_class(self, pc):
+        """How the instruction at pc moves data: sign- or zero-extending, SSE,
+        or plain. Cached per pc; -O0 code revisits the same few instructions."""
+        c = self._insn_cls.get(pc)
+        if c is None:
+            c = ACC_INT
+            try:
+                code = bytes(self.mu.mem_read(pc, 16))
+                for i in self.cs.disasm(code, pc, 1):
+                    m = i.mnemonic
+                    if m.startswith("movsx"):
+                        c = ACC_SEXT
+                    elif m.startswith("movzx"):
+                        c = ACC_ZEXT
+                    elif "xmm" in i.op_str:
+                        c = ACC_SSE
+            except UcError:
+                pass
+            self._insn_cls[pc] = c
+        return c
+
+    def _pointer_target(self, v):
+        """Evidence key for what a pointer-sized value points at, or None.
+
+        A stack target also registers a stack ROOT: the frame offset where an
+        object starts, which is what carves one frame into separate locals.
+        """
+        if not v or v < 0x1000:
+            return None
+        r = self.objects.lookup(v)
+        if r is not None:
+            obj, off = r
+            if obj.kind == STACK:
+                func = self.objects.frame_owner(v)
+                self.evidence.note_stack_root(func, off)
+                return (("sframe", func), off)
+            return (obj.site, off)
+        if self._in_data(v):
+            return (("graw",), v)
+        return None
+
+    def _hook_mem_objects(self, uc, access, addr, size, value, user_data):
+        """Credit every access to the object it hits (phase 11, step 1).
+
+        Accesses to the RUNNING function's own frame are skipped: they are its
+        locals and spills, and a frame's neighbouring locals are exactly what
+        --infer-from-caller invented fields from. Another function's frame is
+        reached only through a pointer, so those accesses are attributed.
+        """
+        if not self.call_stack:
+            return
+        write = access == UC_MEM_WRITE
+        r = self.objects.lookup(addr)
+        if r is not None:
+            obj, off = r
+            if obj.kind == STACK:
+                owner = self.objects.frame_owner(addr)
+                if owner is None or owner == self.objects.innermost_func():
+                    return
+                key, inst = ("sframe", owner), obj.id
+            else:
+                key, inst = obj.site, obj.id
+                if write and self.shadow is not None and obj.kind == HEAP:
+                    self.shadow.write(obj.base, off, size)
+        elif self._in_data(addr):
+            key, off, inst = ("graw",), addr, 0
+        else:
+            return
+        target = None
+        if size == 8:
+            if write:
+                v = value & 0xFFFFFFFFFFFFFFFF
+            else:
+                try:
+                    v = int.from_bytes(bytes(uc.mem_read(addr, 8)), "little")
+                except UcError:
+                    v = 0
+            target = self._pointer_target(v)
+        pc = uc.reg_read(UC_X86_REG_RIP)
+        self.evidence.note_access(key, off, size, write, self._insn_class(pc),
+                                  pc, inst, target)
+
+    def _obj_extent(self, addr):
+        """(base, extent) for capture: a heap block whole, a stack object up
+        to the top of its frame. Data sections come from the global snapshot."""
+        r = self.objects.lookup(addr)
+        if r is None:
+            return None
+        obj, off = r
+        if obj.kind == STACK:
+            ext = self.objects.stack_extent(addr)
+            return (None, min(ext or 0, 512)) if ext else None
+        return obj.base, obj.size
+
+    def _safe_read(self, addr, n):
+        try:
+            return bytes(self.mu.mem_read(addr, n))
+        except UcError:
+            return None
+
+    def _global_pointer_roots(self):
+        """Pointer values held anywhere in the writable data sections."""
+        roots = []
+        for lo, hi in self._data_ranges:
+            if self._rodata and lo == self._rodata[0]:
+                continue
+            blob = self._safe_read(lo, min(hi - lo, 1 << 16))
+            if not blob:
+                continue
+            for o in range(0, len(blob) - 7, 8):
+                v = int.from_bytes(blob[o:o + 8], "little")
+                if v and self.objects.lookup(v) is not None:
+                    roots.append(v)
+        return roots
+
+    def _capture_objects(self, func_addr, values, is_exit):
+        """Record root pointee types and capture reachable memory, broadly."""
+        roots = []
+        start = 0 if is_exit else 1
+        for raw_index in range(start, len(values)):
+            v = values[raw_index]
+            t = self._pointer_target(v)
+            if t is None:
+                continue
+            key = (func_addr, raw_index)
+            self.root_sites.setdefault(key, {})
+            self.root_sites[key][t] = self.root_sites[key].get(t, 0) + 1
+            roots.append(v)
+        if self._globals_enabled():
+            roots += self._global_pointer_roots()
+        regions = walker.capture(roots, self._obj_extent, self._safe_read,
+                                 self._deref_depth() + 1)
+        if self.shadow is not None:
+            # Definedness travels with the bytes: by finalize it has changed.
+            masks = {b: self.shadow.mask(b) for b in regions}
+            regions = {"__regions__": regions,
+                       "__masks__": {b: m for b, m in masks.items() if m is not None}}
+        return regions
+
+    def _sample_memory(self, objmem, gsnap):
+        masks = None
+        if objmem and "__regions__" in objmem:
+            masks = objmem["__masks__"]
+            objmem = objmem["__regions__"]
+        regions = dict(objmem or {})
+        if gsnap:
+            for lo, blob in self._gsnap_pool.get(gsnap[0], {}).items():
+                if blob:
+                    regions.setdefault(lo, blob)
+        return walker.Memory(regions, masks,
+                             POISON_BYTE if self._poison_on() else None)
+
+    def _global_resolver(self):
+        objs = sorted(self.global_objects, key=lambda o: o.address)
+        starts = [o.address for o in objs]
+        import bisect
+
+        def resolve(addr):
+            i = bisect.bisect_right(starts, addr) - 1
+            if i >= 0 and objs[i].address <= addr < objs[i].address + objs[i].size:
+                o = objs[i]
+                return ("global", o.address), addr - o.address, o.size
+            if self._rodata and self._rodata[0] <= addr < self._rodata[1]:
+                return ("rodata",), 0, None
+            return None
+        return resolve
+
+    def _finalize_objects(self):
+        resolve = self._global_resolver()
+        self._resolve = resolve
+        layouts = self.evidence.layouts(resolve)
+        self._types = classify_all(layouts)
+        # A uniform layout - every field the same width and kind, tiling from
+        # 0 - is indistinguishable from an array by accesses alone. For a
+        # global, tier 8 already decided that from the symbol extent; keep its
+        # array rather than overriding it with a guess.
+        from .classify import TypeInfo, FieldType, STRUCT as T_STRUCT
+        for obj in self.global_objects:
+            site = ("global", obj.address)
+            t = self._types.get(site)
+            if t is None or t.shape != T_STRUCT or not obj.is_array:
+                continue
+            sig = {(f.width, "int" if f.kind in ("int", "uint") else f.kind)
+                   for f in t.fields}
+            offs = sorted(f.offset for f in t.fields)
+            contiguous = bool(offs) and offs[0] == 0 and all(
+                b - a == t.fields[0].width for a, b in zip(offs, offs[1:]))
+            if len(sig) == 1 and contiguous:
+                w, k = sig.pop()
+                e = t.fields[0]
+                self._types[site] = TypeInfo(site, T_ARRAY, obj.size,
+                                             [FieldType(0, w, k, e.signed, e.targets)],
+                                             stride=w, count=obj.size // w if w else None)
+        self._string_sites = frozenset([("rodata",)])
+        for site, t in sorted(self._types.items(), key=lambda kv: repr(kv[0])):
+            self.log.verbose(f"  type {t!r}")
+        if getattr(self.args, "dump_layouts", None):
+            self._dump_layouts()
+
+    def _placed(self, target):
+        """Map an evidence target ((key), off) to (site, off), or None."""
+        key, off = target
+        if key[0] == "graw":
+            r = self._resolve(off)
+            return (r[0], r[1]) if r else None
+        if key[0] == "sframe":
+            roots = sorted(x for x in self.evidence.stack_roots.get(key[1], ())
+                           if x <= off)
+            return (("stack", key[1], roots[-1]), off - roots[-1]) if roots else None
+        return key, off
+
+    def _root_type(self, func_addr, raw_index):
+        """The single site a root pointer points at (offset 0), or None.
+
+        Several sites are accepted only if they classify identically; anything
+        else - a pointer into the middle, two different types - abstains.
+        """
+        key = (func_addr, raw_index)
+        if key in self._root_type_cache:
+            return self._root_type_cache[key]
+        sites = {}
+        for t, n in self.root_sites.get(key, {}).items():
+            p = self._placed(t)
+            if p is None:
+                continue
+            site, off = p
+            if off != 0:
+                sites = None
+                break
+            sites[site] = sites.get(site, 0) + n
+        result = None
+        if sites:
+            # A C parameter has ONE static type, so every value it held points
+            # at the same type: a target with no evidence of its own (a stack
+            # array the callee never touched) takes the type of the typed ones.
+            # Typed targets that disagree mean we do not know - abstain.
+            ranked = sorted(sites, key=lambda s: -sites[s])
+            typed = [s for s in ranked if self._shape_sig(s) is not None]
+            shapes = {self._shape_sig(s) for s in typed}
+            if len(shapes) == 1:
+                result = typed[0]
+        self._root_type_cache[key] = result
+        return result
+
+    def _shape_sig(self, site):
+        t = self._types.get(site)
+        if t is None:
+            return None
+        return (t.shape, t.stride, tuple((f.offset, f.width, f.kind) for f in t.fields))
+
+    def _walk_root_vars(self, name, func_addr, raw_index, arg_index=None):
+        site = self._root_type(func_addr, raw_index)
+        vars_ = []
+        if site is not None:
+            vars_ = walker.plan_pointer_root(name, site, self._types, self._deref_depth(),
+                                             string_sites=self._string_sites)
+        # Tier 7's array discriminator (a length argument times a width equals
+        # the allocation size) sees what no stride can: a function that reads
+        # one element per call. Kept as a fallback for argument roots.
+        if arg_index is not None and self._array_enabled() and (
+                not vars_ or vars_[0].rep_type == "hashcode[]"):
+            fields = self._pointee_layout(func_addr, arg_index)
+            w = self._array_element_width(func_addr, arg_index, fields) if fields else None
+            if w:
+                from .classify import SINT
+                vars_ = [walker.Var(f"{name}[..]", "int[]", "int[]", "scalar[]", [],
+                                    ("seq", w, w, SINT, None, None), var_kind="array",
+                                    enclosing=name, array=1)]
+        return vars_
+
+    def _walk_specs(self, vars_, comp_of):
+        return [VarSpec(v.name, dec_type=v.dec_type, rep_type=v.rep_type,
+                        comparability=comp_of(v.comp), var_kind=v.var_kind,
+                        enclosing_var=v.enclosing, array=v.array) for v in vars_]
+
+    def _walk_values(self, vars_, mem, root):
+        return [walker.value_of(v, mem, root, v.array == 1) for v in vars_]
+
+    def _global_walk(self, obj):
+        """('ptr', vars) / ('struct', vars) for a global the walk handles."""
+        if getattr(self.args, "no_walk_globals", False):
+            return None
+        cache = getattr(self, "_gwalk_cache", None)
+        if cache is None:
+            cache = self._gwalk_cache = {}
+        if obj.address in cache:
+            return cache[obj.address]
+        site = ("global", obj.address)
+        T = self._types.get(site)
+        res = None
+        if T is not None and obj.size == 8 and T.fields and T.fields[0].offset == 0 \
+                and T.fields[0].kind == "pointer" and T.fields[0].targets:
+            tsites = {self._placed_site(t) for t in T.fields[0].targets}
+            tsites.discard(None)
+            if len(tsites) == 1:
+                ts = tsites.pop()
+                vars_ = walker.plan_pointer_root(obj.name, ts, self._types,
+                                                 self._deref_depth(),
+                                                 string_sites=self._string_sites)
+                if vars_:
+                    res = ("ptr", vars_)
+        elif T is not None and T.shape == T_ARRAY and T.elem_struct:
+            vars_ = walker.plan_pointer_root(obj.name, site, self._types,
+                                             self._deref_depth(),
+                                             string_sites=self._string_sites)
+            if vars_:
+                res = ("array", vars_)
+        elif T is not None and T.shape == "struct" and len(T.fields) >= 2 \
+                and len({(f.width, f.kind) for f in T.fields}) >= 2:
+            vars_ = walker.plan_struct_global(obj.name, site, self._types,
+                                              self._deref_depth(),
+                                              string_sites=self._string_sites)
+            if vars_:
+                res = ("struct", vars_)
+        cache[obj.address] = res
+        return res
+
+    def _placed_site(self, t):
+        """Site of a classify target (already placed), offset 0 only."""
+        site, off = t
+        return site if off == 0 else None
+
+    def _dump_layouts(self):
+        def site_s(site):
+            return ":".join(str(x) if not isinstance(x, int) else hex(x) for x in site)
+        out = {"types": {}, "roots": {}}
+        for site, t in self._types.items():
+            out["types"][site_s(site)] = {
+                "shape": t.shape, "size": t.size, "stride": t.stride, "count": t.count,
+                "fields": [{"off": f.offset, "width": f.width, "kind": f.kind,
+                            "signed": f.signed,
+                            "targets": [[site_s(x[0]), x[1]] for x in f.targets]}
+                           for f in t.fields]}
+        for (func, raw), _ in self.root_sites.items():
+            site = self._root_type(func, raw)
+            if site is not None:
+                out["roots"].setdefault(hex(func), {})[str(raw)] = site_s(site)
+        out["globals"] = {hex(o.address): {"size": o.size} for o in self.global_objects}
+        with open(self.args.dump_layouts, "w") as fh:
+            json.dump(out, fh, indent=1, sort_keys=True)
 
     def _note_rip_targets(self, insn):
         """Record RIP-relative operand targets that land in a data section.
@@ -575,6 +989,16 @@ class Tracer:
         """
         specs = []
         for obj in self.global_objects:
+            gw = self._global_walk(obj) if self._objects_enabled() else None
+            if gw:
+                # The global itself as a hashcode, then the typed walk: for a
+                # pointer-holding global the object behind it (`g[..]`), for a
+                # struct-valued global its own fields (`g.offK`).
+                specs.append(VarSpec(
+                    obj.name, dec_type="void*", rep_type="hashcode",
+                    comparability=comp_of("global_ptr")))
+                specs.extend(self._walk_specs(gw[1], comp_of))
+                continue
             arr = self._global_pointee_array(obj.address)
             if arr:
                 specs.append(VarSpec(
@@ -634,11 +1058,27 @@ class Tracer:
                     comparability=comp_of("global")))
         return specs
 
-    def _global_values(self, snap):
+    def _global_values(self, snap, blobs=None):
         """Values matching `_global_specs`, read from one snapshot."""
         out = []
         pointees = snap[1] if snap else {}
         for obj in self.global_objects:
+            gw = self._global_walk(obj) if self._objects_enabled() else None
+            if gw:
+                mem = (blobs or {}).get("__mem__") or self._sample_memory(
+                    (blobs or {}).get("__objmem__"), snap)
+                if gw[0] == "array":
+                    out.append(obj.address)
+                    out.extend(self._walk_values(gw[1], mem, obj.address))
+                elif gw[0] == "ptr":
+                    raw8 = self._global_bytes(snap, obj.address, 8)
+                    ptr = int.from_bytes(raw8, "little") if raw8 else 0
+                    out.append(ptr if ptr else NONSENSICAL)
+                    out.extend(self._walk_values(gw[1], mem, ptr))
+                else:
+                    out.append(obj.address)
+                    out.extend(self._walk_values(gw[1], mem, obj.address))
+                continue
             arr = self._global_pointee_array(obj.address)
             if arr:
                 width, count = arr
@@ -1233,6 +1673,13 @@ class Tracer:
                 blobs = self._capture_pointees(address, values)
             if self._array_enabled():
                 self._note_int_args(address, values)
+            if self._objects_enabled():
+                # The frame opens at the return address the call just pushed;
+                # capture happens before, so the callee's (empty) frame holds
+                # nothing yet.
+                blobs = dict(blobs)
+                blobs["__objmem__"] = self._capture_objects(address, values, False)
+                self.objects.push_frame(uc.reg_read(UC_X86_REG_RSP), address)
             self.pending.append(
                 (ppt_enter, "enter", address, values, nonce, blobs,
                  self._snapshot_globals()))
@@ -1317,6 +1764,10 @@ class Tracer:
                 # where at ENTER slot 0 is only caller residue.
                 blobs = self._capture_pointees(entry_addr, values,
                                                include_return=True)
+            if self._objects_enabled():
+                blobs = dict(blobs)
+                blobs["__objmem__"] = self._capture_objects(entry_addr, values, True)
+                self.objects.pop_frame()
             self.pending.append(
                 (ppt_exit, self._exit_ppt_type(), entry_addr, values, nonce,
                  blobs, self._snapshot_globals()))
@@ -1404,6 +1855,12 @@ class Tracer:
         self._log_event(evt)
 
     def _hook_mem_unmapped(self, uc, access, addr, size, value, user_data):
+        if getattr(self.args, "fault_on_unmapped", False):
+            # A native run would crash here. Mapping a zero page instead hides
+            # wild pointers - and a fuzzer needs to see the crash.
+            self.log.info(f"\n[!] Fault: unmapped access at 0x{addr:x} "
+                          f"(size {size}) - stopping")
+            return False
         page = (addr // 0x1000) * 0x1000
         try:
             uc.mem_map(page, 0x1000)
@@ -1489,14 +1946,27 @@ class Tracer:
         # one-element array standing for the object, and one variable per
         # recovered field. Field names are offsets because source names are
         # destroyed by stripping; the scorer aligns offK to DWARF fields.
-        if self._deref_enabled():
+        if self._objects_enabled():
+            for i in range(n_reg + n_stack):
+                raw_index = self._arg_raw_index(i, n_reg)
+                if self._slot_type(func_addr, raw_index) == POINTER:
+                    specs.extend(self._walk_specs(
+                        self._walk_root_vars(f"arg{i}", func_addr, raw_index, i),
+                        comp_of))
+        elif self._deref_enabled():
             for i in range(n_reg + n_stack):
                 for spec in self._pointee_specs(func_addr, i, comp_of):
                     specs.append(spec)
 
         # A pointer-valued return: Kvasir reports return[] and size(return[]),
         # and the argument machinery applies unchanged once slot 0 is followed.
-        if (is_exit and self._deref_enabled()
+        if (is_exit and self._objects_enabled()
+                and self._emits_return(func_addr)
+                and self._slot_type(func_addr, 0) == POINTER
+                and self.arity.returns_value(func_addr)):
+            specs.extend(self._walk_specs(
+                self._walk_root_vars("return", func_addr, 0), comp_of))
+        elif (is_exit and self._deref_enabled()
                 and self._emits_return(func_addr)
                 and self._slot_type(func_addr, 0) == POINTER):
             ret_fields = self._return_pointee_layout(func_addr)
@@ -1676,9 +2146,27 @@ class Tracer:
                 out.append(self._decode_float(
                     bits, self.arity.sse_width(func_addr, i)))
 
-        if self._deref_enabled():
+        mem = None
+        if self._objects_enabled():
+            mem = self._sample_memory((blobs or {}).get("__objmem__"),
+                                      (blobs or {}).get("__gsnap__"))
+            if blobs is not None:
+                blobs["__mem__"] = mem
+            for i in range(n_reg + n_stack):
+                raw_index = self._arg_raw_index(i, n_reg)
+                if self._slot_type(func_addr, raw_index) == POINTER:
+                    out.extend(self._walk_values(
+                        self._walk_root_vars(f"arg{i}", func_addr, raw_index, i),
+                        mem, raw[raw_index]))
+        elif self._deref_enabled():
             out.extend(self._pointee_values(raw, n_reg, n_stack, func_addr, blobs))
-        if (is_exit and self._deref_enabled()
+        if (is_exit and self._objects_enabled()
+                and self._emits_return(func_addr)
+                and self._slot_type(func_addr, 0) == POINTER
+                and self.arity.returns_value(func_addr)):
+            out.extend(self._walk_values(self._walk_root_vars("return", func_addr, 0),
+                                         mem, raw[0]))
+        elif (is_exit and self._deref_enabled()
                 and self._emits_return(func_addr)
                 and self._slot_type(func_addr, 0) == POINTER):
             ret_fields = self._return_pointee_layout(func_addr)
@@ -1732,6 +2220,8 @@ class Tracer:
             self.global_objects = self.global_table.objects()
             for obj in self.global_objects:
                 self.log.verbose(f"  global {obj!r}")
+        if self._objects_enabled():
+            self._finalize_objects()
 
         schemas = {}
         for (ppt_name, ppt_type, func_addr, raw, nonce, blobs,
@@ -1741,11 +2231,14 @@ class Tracer:
             if key not in schemas:
                 schemas[key] = self._schema_for(func_addr, is_exit)
             specs, n_reg, n_stack = schemas[key]
+            if self._objects_enabled():
+                blobs = dict(blobs or {})
+                blobs["__gsnap__"] = gsnap
             values = (raw if n_reg is None
                       else self._filter_values(raw, n_reg, n_stack,
                                                func_addr, is_exit, blobs))
             if self._globals_enabled() and n_reg is not None:
-                values = list(values) + self._global_values(gsnap)
+                values = list(values) + self._global_values(gsnap, blobs)
             self.dtrace.declare(ppt_name, ppt_type, specs)
             self.dtrace.add_sample(ppt_name, values, nonce=nonce)
 
@@ -1906,6 +2399,9 @@ class Tracer:
                 # read, so a read-only hook recovers nothing for it at all.
                 self.mu.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
                                  self._hook_mem_deref)
+            if self._objects_enabled():
+                self.mu.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                                 self._hook_mem_objects)
             self.mu.hook_add(
                 UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED,
                 self._hook_mem_unmapped,
