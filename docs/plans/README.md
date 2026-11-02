@@ -20,7 +20,7 @@ is the research output.
 | [../EVALUATION-KVASIR-SUITE.md](../EVALUATION-KVASIR-SUITE.md) | — | Same tool on Daikon's own test suite | **13/4/6** — globals are 80% of it |
 | [phase9.md](phase9.md) | 8, 9 | Global variables; floating point | **complete** — suite F1 6% → **19%** |
 | [phase10.md](phase10.md) | — | Globals as deref roots; struct globals | **B landed (opt-in), C measured harmful**; A/D/E not started |
-| [phase11.md](phase11.md) | 10 | Object model: pointer provenance, per-allocation-site layouts, typed recursive traversal | **planned** — builds what A needs before A |
+| [phase11.md](phase11.md) | 10 | Object model: pointer provenance, per-allocation-site layouts, typed recursive traversal | **implemented** (tier 10): suite F1 19.6% → 24.3%, precision up; 0 unsound facts |
 | [../VERIFICATION.md](../VERIFICATION.md) | — | What can be formally verified, and what cannot | **reviewed** — 1 defect found |
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
 

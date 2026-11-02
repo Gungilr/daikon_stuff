@@ -1,7 +1,8 @@
 # Phase 11 — an object model for pointers: provenance, per-site layouts, typed traversal
 
-Status: **planned, not started.** Supersedes the *order* of phase 10's mechanism A; its
-goals and acceptance criterion carry over unchanged.
+Status: **implemented (tier 10); measured below — see [Results](#results-2026-11-02).**
+Supersedes the *order* of phase 10's mechanism A; its goals and acceptance criterion
+carry over unchanged.
 
 ## Why
 
@@ -291,3 +292,125 @@ can be landed and measured before anything reaches Daikon.
 - **A `double` never used as a double.** About 5% of the oracle is information-theoretic
   residue of this kind.
 - **Stack array bounds.** Nothing observable bounds a stack object, so step 3 abstains.
+
+---
+
+## Results (2026-11-02)
+
+Everything below is tier 10 (`--tier 10`), measured in this container with Daikon and
+Kvasir built from source. Suite = Daikon's 30 Kvasir-suite programs, run with
+`--infer-unobserved-fields --poison-uninitialized` as for the documented tier-8 baseline;
+own corpus = `tests/test*.c` with `--poison-uninitialized`.
+
+### Standing gates
+
+| gate | result |
+|---|---|
+| goldens byte-identical without the flag | **pass**, 465 tests pass (`tests_py`) |
+| suite precision ≥ 20%, Daikon exits 0 on all | **pass**, 25.5%, no Daikon failures |
+| own corpus ≥ 65/92/76 | **pass**, unchanged at 155/239 matched (the 65/92/76 figure) |
+| `audit_soundness.py`: 0 false facts | **pass**, 0 of 6717 audited (suite + own corpus); also 0 with `--rodata-strings` and with `--shadow` |
+| DWARF only at scoring | **pass**: `ground_truth.py` / `layout_score.py` / `score_invariants.py` only |
+
+The audit caught one real defect on the way: typing the read-only literal pool made the
+constant `3.45` a `double`, comparable to a `float` argument of `3.45f`, and Daikon's
+fuzzy float equality then asserted `arg1 == g_0x402018`. Literal-pool entries are not
+program variables (Kvasir never reports them), so tier 10 leaves them as tier 8 prints them.
+
+### Suite: tier 8 → tier 10
+
+| | ours | matched | precision | recall | F1 |
+|---|---|---|---|---|---|
+| tier 8 (documented baseline) | 3905 | 912 | 23.4% | 16.8% | 19.6% |
+| **tier 10, depth 2 (default)** | 4935 | **1256** | **25.5%** | **23.2%** | **24.3%** |
+| tier 10, `--deref-depth 1` | 4803 | 1256 | 26.2% | 23.2% | 24.6% |
+| tier 10, `--deref-depth 3` | 4935 | 1256 | 25.5% | 23.2% | 24.3% |
+| tier 10, `--shadow` (instead of poison) | 5056 | 1241 | 24.5% | 22.9% | 23.7% |
+| tier 10, `--shadow --poison-uninitialized` | 4935 | 1256 | 25.5% | 23.2% | 24.3% |
+| tier 10, `--rodata-strings` | 4920 | **1282** | 26.1% | 23.7% | 24.8% |
+
++344 matched over tier 8 with precision *up*, where `--deref-globals` bought +176 at a
+loss of 6 precision points.
+
+### Per-step acceptance
+
+**Step 1 — object table.**
+- Goldens: pass.
+- Two-pointer copy: `copy_item(dst, src)` in `tests/test16.c` gets the full layout on
+  both objects, as distinct stack sites (`test_two_pointer_copy_credits_each_object`).
+- Overhead: pass, **1.32×** (small-test 6.38 s vs 4.85 s at tier 7, best of 2).
+  test08 runs 548 instructions in 0.2 s at every tier, too short to measure, so
+  small-test (the one long-running suite program) stands in for it.
+
+**Steps 2–3 — layouts and kinds**, `scripts/rea_eval/layout_score.py` over the suite and
+own corpus (89 typed sites tied to a DWARF parameter pointee or global):
+
+| metric | target | result |
+|---|---|---|
+| layout F1 | ≥ 0.80 | **0.897** (P 94.9%, R 85.1%) |
+| invented fields | ≤ 5% | **5.1%** (9 of 176) — just over |
+| kind accuracy | ≥ 90% | **100%** (141 of 141) |
+| wrong kind | ≤ 3% | **0%** |
+| abstentions | counted apart | 26 fields; the one union abstained |
+
+- The 9 invented fields are all wide moves over narrower members that the program never
+  touches narrowly: a struct copied by 8-byte loads (`crazy-test-1`, `md5`), and a zeroing
+  store over `char` members (`DisambigTest`, `ArraysInStructTest`). Nothing at run time
+  separates such a copy from a real 8-byte field.
+- Kind accuracy reached 100% after one rule: **an 8-byte slot that only ever held 0
+  abstains** (NULL and 0L read alike). Before it, the 4.7% wrong kinds were all
+  never-dereferenced NULL pointers typed `int`, e.g. `n1->prev = 0` in small-test.
+- Shape is right for 78.7% of sites. Most misses are `T *p` used as an array (DWARF calls it
+  a pointer to a scalar; the run sees elements), or an array touched at under 4 elements.
+- String criterion: string-arrays reports its strings at tier 10. GlobalTest's
+  `globalStr` is never dereferenced by the program, so no run-time evidence types it; it is
+  reported with `--rodata-strings` (phase 10 E's flag-gated rule). No `char[]` buffer
+  is reported as a string: `upcasestr[128]` is not pointer-sized.
+
+**Step 4 — typed traversal.**
+
+| criterion | result |
+|---|---|
+| suite recall rises from 17%, precision ≥ 20%, Daikon exits 0 | **pass**: 23.2%, 25.5%, 0 failures |
+| depth 1 holds `--deref-globals`' +176 at ≥ 20% | **pass**: +344 at 26.2% |
+| `NestedStructTest` > 150 matched | **not met, infeasible**: 44 (10 before). 560 of its 677 oracle facts are about `globalBetterFoo`, which the program never touches; ~117 is the most any black-box tracer can reach |
+| `NestedStructVarList` `size(::counters[]) == 10` | **not met, abstained**: the program touches `counters[0]`, `[5]`, `[9]` with constant indices; that is byte-for-byte a struct with three `int` fields at +0/+20/+36, below Howard's 4-element stride threshold. Calling it an array would be a guess |
+
+Depth 2 vs depth 1: on the suite, depth 2 adds 132 facts and **no** matches. They are true
+(audit) but unmatched for two reasons:
+- CoercePointerTest goes through a `void *` field that Kvasir does not follow.
+- small-test's `n->next->b` comes out as an equality (`arg0[].off0->off16 == arg0[].off16`)
+  where Kvasir, with DynComp separating the variables, prints `== [2]`.
+
+On test16, depth 2 is what yields `head->next->val`. Depth 2 stays the default; depth 1 is
+the higher-precision choice for this suite.
+
+**Step 5 — shadow memory (`--shadow`).**
+- Uninitialised read: test16's `peek` reads a heap field nobody wrote. We print
+  `nonsensical` with modbit 2, identical to Kvasir's trace of the same binary. test13, named
+  in the plan, has no uninitialised read; Kvasir and we both print 0 `nonsensical` there.
+- Fault mode: `--fault-on-unmapped` stops on a wild pointer that the default mode zero-fills
+  (`test_fault_on_unmapped_stops_on_a_wild_pointer`).
+- No regression versus `--poison-uninitialized`:
+  - **`--shadow` with poison: met** (1256 = 1256).
+  - **`--shadow` alone: −15 matched.** It tracks heap bytes only, as Kvasir does, and treats
+    the stack as initialised; poison also catches uninitialised stack bytes reached through
+    pointers (crazy-test-1 −12, NestedStructTest −4).
+
+STEP6_PLACEHOLDER
+
+**Step 7 — heap shapes. Not built: gate failed.** Depth 3 adds 0 matched facts over depth 2
+on small-test and NestedStructTest (the gate needed > 20), and on the whole suite.
+
+### New flags
+
+| flag | default | effect |
+|---|---|---|
+| `--tier 10` | — | object table, per-site layouts, typed walk from every root |
+| `--deref-depth N` | 2 | walk depth |
+| `--dump-layouts PATH` | off | JSON of every site's recovered type and root mapping (for scoring) |
+| `--no-walk-globals` | off | keep tier 8's global handling |
+| `--shadow` | off | per-byte heap definedness; never-written bytes are `nonsensical` |
+| `--fault-on-unmapped` | off | stop on an access to unmapped memory |
+| `--rodata-strings` | off | a pointer-sized global naming a `.rodata` text run is a `char *` |
+| `--static-layouts PATH` | off | add static (Ghidra p-code) fields as ABSTAIN to run-typed structs |
