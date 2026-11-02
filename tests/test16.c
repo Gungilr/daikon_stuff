@@ -18,6 +18,9 @@
  * tag        a struct global holding a string pointer and a count.
  * half       a heap struct whose second field is never written: with
  *            --shadow it is nonsensical, as Kvasir reports it.
+ * motto      a char* global the program never dereferences: only its value,
+ *            the address of a .rodata string, says it is a string
+ *            (--rodata-strings).
  */
 
 typedef struct { int id; double weight; } item_t;
@@ -28,6 +31,7 @@ typedef struct { int set; int unset; } half_t;
 
 double scale = 2.5;
 tag_t tag = { "fixture", 3 };
+const char *motto = "never read";
 
 void copy_item(item_t *dst, const item_t *src) {
     dst->id = src->id;

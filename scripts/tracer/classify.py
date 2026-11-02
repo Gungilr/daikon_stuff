@@ -100,6 +100,14 @@ def classify_field(offset, ev):
             return FieldType(offset, width, ABSTAIN, evidence="sse and integer at one offset")
         return FieldType(offset, width if width in (4, 8) else 8, FLOAT,
                          evidence="moved by SSE")
+    if (width == POINTER_WIDTH and set(ev.widths) == {POINTER_WIDTH}
+            and getattr(ev, "zeros", 0) and not getattr(ev, "plain", 0)
+            and not cls.get(SEXT, 0) and not cls.get(ZEXT, 0)):
+        # Only ever 0 in a word-sized slot: a NULL pointer and a 0L read
+        # alike. Marked here, turned into ABSTAIN by _zero_words once overlap
+        # resolution has run (a wide zeroing store over narrower fields is a
+        # copy, not a field).
+        return FieldType(offset, width, SINT, evidence=ZERO_WORD)
     signed = None
     if cls.get(SEXT, 0) and not cls.get(ZEXT, 0):
         signed = True
@@ -107,6 +115,15 @@ def classify_field(offset, ev):
         signed = False
     return FieldType(offset, width, SINT if signed is not False else UINT,
                      signed=signed, evidence="integer access")
+
+
+ZERO_WORD = "only zero: NULL or 0"
+
+
+def _zero_words(fields):
+    return [FieldType(f.offset, f.width, ABSTAIN, evidence=f.evidence)
+            if f.evidence == ZERO_WORD and f.width == POINTER_WIDTH else f
+            for f in fields]
 
 
 def _drop_overlaps(fields):
@@ -152,17 +169,20 @@ def classify(layout):
         outside = [f for f in raw if not (start <= f.offset < span_end)]
         if start == 0 and not outside:
             elem = _array_element(inside, stride)
+            cnt = (layout.size // stride) if layout.size else n
+            if isinstance(elem, list):
+                return TypeInfo(layout.site, ARRAY, layout.size, elem,
+                                stride=stride, count=cnt, elem_struct=True)
             if elem is not None:
-                cnt = (layout.size // stride) if layout.size else n
                 return TypeInfo(layout.site, ARRAY, layout.size, [elem],
                                 stride=stride, count=cnt)
         elif outside and inside:
             elem = _array_element(inside, stride)
-            if elem is not None and elem.kind in (SINT, UINT, FLOAT, POINTER):
+            if isinstance(elem, FieldType) and elem.kind in (SINT, UINT, FLOAT, POINTER):
                 af = FieldType(start, stride, ARRAY_FIELD, elem.signed, elem.targets,
                                "strided run inside a struct", stride=stride, count=n,
                                elem_kind=elem.kind)
-                fields = _drop_overlaps(outside) + [af]
+                fields = _zero_words(_drop_overlaps(outside)) + [af]
                 return TypeInfo(layout.site, STRUCT, layout.size,
                                 sorted(fields, key=lambda f: f.offset))
 
@@ -189,6 +209,9 @@ def classify(layout):
         if walked >= MIN_ARRAY_ELEMENTS or (uniform and n and n >= MIN_ARRAY_ELEMENTS
                                             and walked >= 2):
             elem = _array_element(raw, stride)
+            if isinstance(elem, list):
+                return TypeInfo(layout.site, ARRAY, layout.size, elem,
+                                stride=stride, count=n, elem_struct=True)
             if elem is not None:
                 return TypeInfo(layout.site, ARRAY, layout.size, [elem],
                                 stride=stride, count=n)
@@ -199,7 +222,7 @@ def classify(layout):
         return TypeInfo(layout.site, ARRAY, layout.size, elem_fields, stride=p,
                         count=layout.size // p, elem_struct=True)
 
-    fields = _drop_overlaps(raw)
+    fields = _zero_words(_drop_overlaps(raw))
     if len(fields) == 1 and fields[0].offset == 0 and (
             layout.size is None or layout.size <= fields[0].width):
         return TypeInfo(layout.site, SCALAR, layout.size, fields)
@@ -221,8 +244,14 @@ def _array_element(raw, stride):
     if len(by_off) == 1 and 0 in by_off:
         e = by_off[0]
         return FieldType(0, e.width, e.kind, e.signed, e.targets, e.evidence)
-    # array of structs: keep only the first element's layout as the element
-    return FieldType(0, stride, STRUCT, evidence="array of structs")
+    # array of structs: the element layout is every field folded onto
+    # [0, stride); overlaps inside one element are resolved as for a struct
+    elem = _zero_words(_drop_overlaps(
+        [FieldType(o, f.width, f.kind, f.signed, f.targets, f.evidence)
+         for o, f in sorted(by_off.items())]))
+    if len(elem) < 2 or any(f.offset + f.width > stride for f in elem):
+        return FieldType(0, stride, STRUCT, evidence="array of structs")
+    return elem
 
 
 def _strided_runs(layout):

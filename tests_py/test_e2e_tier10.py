@@ -155,3 +155,49 @@ def test_daikon_accepts_the_trace(t16, tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0 and "Exception" not in out, out[-2000:]
     assert "arg0[].off8->off0" in out or "second()" in out
+
+
+def test_rodata_string_global_is_flag_gated(t16, tmp_path):
+    """`motto` is never dereferenced: tier 10 alone has no evidence it is a
+    string; --rodata-strings reads it from the pointer's .rodata target."""
+    plain = _blocks(_decl(t16[0], "..main():::ENTER"))
+    assert not any('"never read"' in l for b in plain.values() for l in b)
+    dtrace, _ = _trace("test16", tmp_path / "s.dtrace", "--tier", "10", "--rodata-strings")
+    blocks = _blocks(_decl(dtrace, "..main():::ENTER"))
+    strs = [n for n, b in blocks.items() if n.startswith("g_0x") and "rep-type java.lang.String" in b]
+    assert strs
+    assert '"never read"' in [_values(dtrace, "..main():::ENTER", n)[0] for n in strs]
+
+
+def test_shadow_modbit_matches_kvasir(t16):
+    """Kvasir prints a never-written heap field as `nonsensical` with modbit 2."""
+    lines = t16[0].splitlines()
+    i = lines.index("..peek():::ENTER")
+    j = lines.index("arg0[..].off4", i)
+    assert lines[j + 1:j + 3] == ["nonsensical", "2"]
+
+
+def test_static_layouts_add_abstain_fields_only(tmp_path):
+    """A static field joins a struct the run typed, as ABSTAIN - so the dump
+    grows and the dtrace does not change. A static list that agrees with no
+    observed field is ignored (the parameter mapping is unconfirmed)."""
+    base = tmp_path / "base.json"
+    d0, _ = _trace("test16", tmp_path / "a.dtrace", "--tier", "10", "--dump-layouts", str(base))
+    lay0 = json.loads(base.read_text())
+    copy = min(lay0["roots"], key=lambda f: int(f, 16))      # copy_item(dst, src)
+    site = lay0["roots"][copy]["1"]
+    assert {(f["off"], f["width"]) for f in lay0["types"][site]["fields"]} == {(0, 4), (8, 8)}
+    sl = tmp_path / "static.json"
+    # item_t is {int id; double weight}: claim the padding at +4 as a field
+    # (agreeing with the observed +0), and give src a list matching nothing.
+    sl.write_text(json.dumps({"functions": {copy: {"1": [[0, 4], [4, 4]], "2": [[40, 4]]}}}))
+    out = tmp_path / "s.json"
+    d1, _ = _trace("test16", tmp_path / "b.dtrace", "--tier", "10", "--dump-layouts", str(out),
+                   "--static-layouts", str(sl))
+    lay1 = json.loads(out.read_text())
+    assert d1 == d0
+    fs = {(f["off"], f["width"]): f for f in lay1["types"][site]["fields"]}
+    assert set(fs) == {(0, 4), (4, 4), (8, 8)}
+    assert fs[(4, 4)]["kind"] == "abstain" and fs[(4, 4)]["evidence"].startswith("static")
+    src = lay1["types"][lay1["roots"][copy]["2"]]["fields"]
+    assert all(not (f.get("evidence") or "").startswith("static") for f in src)

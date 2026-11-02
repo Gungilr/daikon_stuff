@@ -23,7 +23,7 @@ INT, SEXT, ZEXT, SSE = "int", "sext", "zext", "sse"
 
 
 class FieldEvidence:
-    __slots__ = ("widths", "classes", "reads", "writes", "targets")
+    __slots__ = ("widths", "classes", "reads", "writes", "targets", "zeros", "plain")
 
     def __init__(self):
         self.widths = Counter()
@@ -31,6 +31,8 @@ class FieldEvidence:
         self.reads = 0
         self.writes = 0
         self.targets = Counter()     # target site -> count (pointer values)
+        self.zeros = 0               # 8-byte values that were 0 (NULL or 0L)
+        self.plain = 0               # 8-byte non-zero values pointing nowhere
 
     def merge(self, other):
         self.widths.update(other.widths)
@@ -38,6 +40,8 @@ class FieldEvidence:
         self.reads += other.reads
         self.writes += other.writes
         self.targets.update(other.targets)
+        self.zeros += other.zeros
+        self.plain += other.plain
 
     @property
     def count(self):
@@ -101,7 +105,8 @@ class Evidence:
         self._instances = defaultdict(set)         # key -> {instance}
         self.stack_roots = defaultdict(set)        # func -> {frame offsets}
 
-    def note_access(self, key, off, width, write, cls, pc, instance, target=None):
+    def note_access(self, key, off, width, write, cls, pc, instance, target=None,
+                    word=None):
         ev = self._acc[(key, off)]
         ev.widths[width] += 1
         ev.classes[cls] += 1
@@ -111,6 +116,11 @@ class Evidence:
             ev.reads += 1
         if target is not None:
             ev.targets[target] += 1
+        elif word is not None:
+            if word:
+                ev.plain += 1
+            else:
+                ev.zeros += 1
         self._pcs[(key, instance, pc)].add(off)
         self._instances[key].add(instance)
 
@@ -179,6 +189,8 @@ class Evidence:
             fe.classes.update(ev.classes)
             fe.reads += ev.reads
             fe.writes += ev.writes
+            fe.zeros += ev.zeros
+            fe.plain += ev.plain
             for t, n in ev.targets.items():
                 mt = map_target(t)
                 if mt is not None:

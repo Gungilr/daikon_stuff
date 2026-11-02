@@ -14,7 +14,10 @@ Metrics
   shape    struct / array / scalar right
 
 Usage:
-    python3 scripts/rea_eval/layout_score.py BIN [BIN ...]
+    python3 scripts/rea_eval/layout_score.py [--static DIR] BIN [BIN ...]
+
+--static DIR passes DIR/<name>.json (scripts/rea_eval/static_layouts.py) to
+the tracer as --static-layouts, to measure step 6.
 """
 import collections
 import json
@@ -53,9 +56,24 @@ def kind_of(die):
     return "other", size, None
 
 
+def array_count(adie):
+    """Total element count of an array type DIE (product of its subranges)."""
+    n = 1
+    for c in adie.iter_children():
+        if c.tag == "DW_TAG_subrange_type":
+            cnt = _attr(c, "DW_AT_count")
+            ub = _attr(c, "DW_AT_upper_bound")
+            if isinstance(cnt, int):
+                n *= cnt
+            elif isinstance(ub, int):
+                n *= ub + 1
+    return n
+
+
 def flatten(sdie, base=0, depth=0):
-    """[(offset, size, kind, signed)] leaf members; an array member is one
-    field of its element size (the tracer models it as an array field)."""
+    """[(offset, size, kind, signed, span)] leaf members; an array member is
+    one field of its element size spanning the whole array (the tracer models
+    it as an array field; any element of it counts)."""
     out = []
     if depth > 6:
         return out
@@ -72,11 +90,12 @@ def flatten(sdie, base=0, depth=0):
             e = _strip(_ref(t))
             ek, es, esg = kind_of(_ref(t))
             if ek == "struct" and e is not None:
-                out.extend(flatten(e, base + off, depth + 1))   # first element
+                for i in range(array_count(t)):
+                    out.extend(flatten(e, base + off + i * es, depth + 1))
             else:
-                out.append((base + off, es, ek, esg))
+                out.append((base + off, es, ek, esg, es * array_count(t)))
         else:
-            out.append((base + off, size, k, signed))
+            out.append((base + off, size, k, signed, size))
     return out
 
 
@@ -91,8 +110,8 @@ def truth_layout(die):
         ek, es, esg = kind_of(_ref(d))
         if ek == "struct" and e is not None:
             return "array_of_struct", flatten(e), es
-        return "array", [(0, es, ek, esg)], es
-    return "scalar", [(0, size, k, signed)], None
+        return "array", [(0, es, ek, esg, es)], es
+    return "scalar", [(0, size, k, signed, size)], None
 
 
 def dwarf_index(path):
@@ -115,17 +134,27 @@ def dwarf_index(path):
     return funcs, globs
 
 
+STATIC_DIR = None
+
+
 def run_tracer(binary, out_json):
+    extra = []
+    if STATIC_DIR:
+        sj = os.path.join(STATIC_DIR, os.path.basename(binary).rsplit(".exe", 1)[0] + ".json")
+        if os.path.exists(sj):
+            extra = ["--static-layouts", sj]
     with tempfile.TemporaryDirectory() as d:
         subprocess.run([sys.executable, SHIM, binary, "-o", os.path.join(d, "t.dtrace"),
-                        "--start-func", "main", "--tier", "10", "--dump-layouts", out_json],
-                       capture_output=True, text=True, timeout=600)
+                        "--start-func", "main", "--tier", "10", "--dump-layouts", out_json]
+                       + extra, capture_output=True, text=True, timeout=600)
 
 
 def predicted(t):
     if t is None:
         return None, [], None
     if t["shape"] == "array":
+        if t.get("elem_struct"):
+            return "array_of_struct", t["fields"], t["stride"]
         fs = t["fields"]
         if len(fs) >= 1 and (len(fs) > 1 or fs[0]["width"] != t["stride"]
                              or fs[0]["kind"] == "struct"):
@@ -185,11 +214,49 @@ def score(binaries):
             C["sites"] += 1
             C[f"shape:{tshape}->{pshape}"] += 1
             C["shape_ok"] += (tshape == pshape)
+            if tshape == "scalar" and tfields[0][2] in ("void", "other"):
+                C["truth_void"] += 1        # void* pointee: nothing to score
+                continue
             if pshape == "array" and tshape == "array":
                 C["array_width_ok"] += (pfields and pfields[0]["width"] == tfields[0][1])
                 C["array_sites"] += 1
                 continue
-            truth = {(o, s): (k, sg) for o, s, k, sg in tfields}
+            truth = {(o, s): (k, sg) for o, s, k, sg, _ in tfields}
+            spans = [(o, s, sp, k, sg) for o, s, k, sg, sp in tfields if sp > s]
+
+            hit = set()
+
+            def match(o, w):
+                """(truth kind, signed) of the field (o, w) lands on, else None;
+                "bulk" for an odd-width access inside an array member."""
+                r = _match(o, w)
+                if r is not None and r[0] != "bulk":
+                    hit.add(_key[0])
+                return r
+
+            _key = [None]
+
+            def _match(o, w):
+                if tstride and tshape in ("array_of_struct", "array"):
+                    o = o % tstride
+                elif tshape == "scalar" and tfields[0][1]:
+                    # T *p may point into a T[]: p[k] is an element, not a field
+                    if o % tfields[0][1] == 0:
+                        o = 0
+                if (o, w) in truth:
+                    _key[0] = (o, w)
+                    return truth[(o, w)]
+                for to, ts, sp, k, sg in spans:
+                    if to <= o < to + sp:
+                        _key[0] = (to, ts)
+                        return (k, sg) if (w == ts and (o - to) % ts == 0) else ("bulk", None)
+                return None
+            static_set = {(f["off"], f["width"]) for f in pfields
+                          if (f.get("evidence") or "").startswith("static")}
+
+            def f_static(o, w):
+                return (o, w) in static_set
+
             pred = [(f["off"], f["width"], f["kind"], f["signed"]) for f in pfields
                     if f["kind"] != "array_field"]
             for f in pfields:
@@ -199,9 +266,19 @@ def score(binaries):
                 C["pred_fields"] += 1
                 if k == "abstain":
                     C["abstain_fields"] += 1
-                if (o, w) in truth or (k == "array_field" and any(to == o for to, _ in truth)):
+                if f_static(o, w):
+                    C["static_fields"] += 1
+                m = match(o, w)
+                if m is None and k == "array_field" and any(to == o for to, _ in truth):
+                    m = (None, None)
+                    hit.add(next(t for t in truth if t[0] == o))
+                if m is not None and m[0] == "bulk":
+                    C["bulk_in_array"] += 1
+                    C["pred_fields"] -= 1
+                    continue
+                if m is not None:
                     C["field_tp"] += 1
-                    tk, tsg = truth.get((o, w), (None, None))
+                    tk, tsg = m
                     if k in ("abstain", "array_field") or tk is None:
                         continue
                     C["kind_checked"] += 1
@@ -217,7 +294,13 @@ def score(binaries):
                     C["field_fp"] += 1
                     if len(examples["invented"]) < 10:
                         examples["invented"].append((label, o, w, k))
-            C["truth_fields"] += len(truth)
+            if tshape == "array_of_struct":
+                tk = {(o % tstride, w) for o, w in truth}
+                C["truth_fields"] += len(tk)
+                C["truth_hit"] += len({(o % tstride, w) for o, w in hit})
+            else:
+                C["truth_fields"] += len(truth)
+                C["truth_hit"] += len(hit)
     return C, examples
 
 
@@ -226,23 +309,29 @@ def pct(a, b):
 
 
 def main(argv):
-    C, ex = score(argv[1:])
+    global STATIC_DIR
+    args = argv[1:]
+    if args and args[0] == "--static":
+        STATIC_DIR, args = args[1], args[2:]
+    C, ex = score(args)
     P = C["field_tp"] / C["pred_fields"] if C["pred_fields"] else 0
-    R = C["field_tp"] / C["truth_fields"] if C["truth_fields"] else 0
+    R = C["truth_hit"] / C["truth_fields"] if C["truth_fields"] else 0
     F = 2 * P * R / (P + R) if P + R else 0
     print(f"typed sites tied to DWARF: {C['sites']}   (untyped: {C['untyped']}, "
-          f"unions: {C['truth_union']} - abstained {C['union_abstained']})")
+          f"unions: {C['truth_union']} - abstained {C['union_abstained']}, "
+          f"void* pointees not scored: {C['truth_void']})")
     print(f"shape right: {pct(C['shape_ok'], C['sites'])}   "
           + ", ".join(f"{k[6:]} {v}" for k, v in sorted(C.items()) if k.startswith("shape:")))
     print(f"scalar arrays: element width right {pct(C['array_width_ok'], C['array_sites'])}"
           f" of {C['array_sites']}")
     print(f"LAYOUT fields: precision {pct(C['field_tp'], C['pred_fields'])}  "
-          f"recall {pct(C['field_tp'], C['truth_fields'])}  F1 {100 * F:5.1f}%   "
-          f"invented {pct(C['field_fp'], C['pred_fields'])} ({C['field_fp']} of {C['pred_fields']})")
+          f"recall {pct(C['truth_hit'], C['truth_fields'])}  F1 {100 * F:5.1f}%   "
+          f"invented {pct(C['field_fp'], C['pred_fields'])} ({C['field_fp']} of {C['pred_fields']})"
+          f"   [bulk copies inside array members, not scored: {C['bulk_in_array']}]")
     print(f"KIND (matched fields): right {pct(C['kind_ok'], C['kind_checked'])} of "
           f"{C['kind_checked']}   wrong {pct(C['kind_checked'] - C['kind_ok'], C['kind_checked'])}"
           f"   signedness right {pct(C['sign_ok'], C['sign_checked'])} of {C['sign_checked']}"
-          f"   abstained {C['abstain_fields']}")
+          f"   abstained {C['abstain_fields']} (static-only fields: {C['static_fields']})")
     for k, v in ex.items():
         for e in v:
             print(f"   [{k}] {e}")

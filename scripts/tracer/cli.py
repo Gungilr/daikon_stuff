@@ -210,6 +210,11 @@ def build_parser():
     heur.add_argument("--fault-on-unmapped", action="store_true",
                       help="Stop emulation on an access to unmapped memory "
                            "instead of silently mapping a zero page.")
+    heur.add_argument("--rodata-strings", action="store_true",
+                      help="Tier 10: a pointer-sized global holding the address of a "
+                           "NUL-terminated printable run in .rodata is a char* "
+                           "(phase 10 E). A heuristic: a byte table that happens to "
+                           "look like text would be misreported, so it is opt-in.")
     heur.add_argument("--static-layouts", metavar="PATH",
                       help="Tier 10: JSON of statically observed field offsets "
                            "(scripts/rea_eval/static_layouts.py). Adds fields "

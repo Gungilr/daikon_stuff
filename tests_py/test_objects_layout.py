@@ -169,3 +169,31 @@ def test_strings():
     assert not looks_like_string(b"\x01\x02\0")
     assert not looks_like_string(b"no terminator")
     assert not looks_like_string(b"\0")
+
+
+def test_word_only_ever_zero_abstains():
+    """n->prev = 0 and never another value: NULL and 0L read alike."""
+    acc = [(H, 0, 8, True, INT, 1, 1, None, 0), (H, 8, 8, True, INT, 2, 1, None, 7),
+           (H, 16, 4, True, INT, 3, 1)]
+    kinds = {f.offset: f.kind for f in classify(lay(acc, {H: 24})[H]).fields}
+    assert kinds[0] == ABSTAIN          # only 0 seen
+    assert kinds[8] == SINT             # a non-zero non-pointer value: an integer
+    assert kinds[16] == SINT
+
+
+def test_zeroing_store_over_narrow_fields_is_not_a_field():
+    """An 8-byte zeroing store over two 4-byte fields stays two int fields."""
+    acc = [(H, 0, 8, True, INT, 1, 1, None, 0), (H, 0, 4, False, INT, 2, 1),
+           (H, 4, 4, False, INT, 3, 1), (H, 8, 4, False, INT, 4, 1)]
+    fs = [(f.offset, f.width, f.kind) for f in classify(lay(acc, {H: 12})[H]).fields]
+    assert fs == [(0, 4, SINT), (4, 4, SINT), (8, 4, SINT)]
+
+
+def test_array_of_structs_keeps_the_element_layout():
+    """A loop over 5 {int; double} elements: the element's two fields survive."""
+    acc = []
+    for i in range(5):
+        acc += [(H, i * 16, 4, False, INT, 0x50, 1), (H, i * 16 + 8, 8, False, SSE, 0x51, 1)]
+    ti = classify(lay(acc, {H: 80})[H])
+    assert ti.shape == ARRAY and ti.stride == 16 and ti.elem_struct
+    assert [(f.offset, f.width, f.kind) for f in ti.fields] == [(0, 4, SINT), (8, 8, FLOAT)]

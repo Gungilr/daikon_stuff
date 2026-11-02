@@ -257,7 +257,9 @@ def _follow(mem, ptr, path):
 
 
 def _quote(s):
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    """A dtrace string literal; \r must be escaped, a raw one would end the line."""
+    return '"' + (s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                  .replace("\r", "\\r")) + '"'
 
 
 def value_of(var, mem, root, in_array):

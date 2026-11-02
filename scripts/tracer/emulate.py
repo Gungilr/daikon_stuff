@@ -182,6 +182,9 @@ def discover_main_via_emulation(segments, is_64bit, entry_point,
     return main_addr
 
 
+STATIC_EVIDENCE = "static: on a path the run did not take"
+
+
 class Tracer:
     def __init__(self, args, log):
         self.args = args
@@ -549,7 +552,7 @@ class Tracer:
             key, off, inst = ("graw",), addr, 0
         else:
             return
-        target = None
+        target = v = None
         if size == 8:
             if write:
                 v = value & 0xFFFFFFFFFFFFFFFF
@@ -561,7 +564,7 @@ class Tracer:
             target = self._pointer_target(v)
         pc = uc.reg_read(UC_X86_REG_RIP)
         self.evidence.note_access(key, off, size, write, self._insn_class(pc),
-                                  pc, inst, target)
+                                  pc, inst, target, v)
 
     def _obj_extent(self, addr):
         """(base, extent) for capture: a heap block whole, a stack object up
@@ -675,10 +678,54 @@ class Tracer:
                                              [FieldType(0, w, k, e.signed, e.targets)],
                                              stride=w, count=obj.size // w if w else None)
         self._string_sites = frozenset([("rodata",)])
+        if getattr(self.args, "static_layouts", None):
+            self._apply_static_layouts(self.args.static_layouts)
         for site, t in sorted(self._types.items(), key=lambda kv: repr(kv[0])):
             self.log.verbose(f"  type {t!r}")
         if getattr(self.args, "dump_layouts", None):
             self._dump_layouts()
+
+    def _apply_static_layouts(self, path):
+        """Add fields seen statically on paths the run did not take (step 6).
+
+        A static field joins a parameter's site only when the run already
+        typed that site a STRUCT, at least one static field agrees with an
+        observed one (same offset and width - the mapping of Ghidra's
+        parameter to our register is then confirmed), and it overlaps no
+        observed field and stays inside the object. It is ABSTAIN: it claims
+        existence and width only, so the walker never emits a value for it.
+        """
+        from .classify import FieldType, ABSTAIN, STRUCT as T_STRUCT
+        try:
+            with open(path) as fh:
+                funcs = json.load(fh).get("functions", {})
+        except (OSError, ValueError) as e:
+            self.log.info(f"[!] --static-layouts: cannot read {path}: {e}")
+            return
+        # Resolve every root first, so adding fields cannot change which
+        # sites are judged alike (static fields are also excluded from that).
+        for func, raw in list(self.root_sites):
+            self._root_type(func, raw)
+        added = 0
+        for faddr, slots in funcs.items():
+            for raw, offs in slots.items():
+                site = self._root_type(int(faddr, 16), int(raw))
+                t = self._types.get(site) if site is not None else None
+                if t is None or t.shape != T_STRUCT:
+                    continue
+                seen = {(f.offset, f.width) for f in t.fields}
+                static = {(o, w) for o, w in offs}
+                if not static & seen:
+                    continue
+                for o, w in sorted(static - seen):
+                    if t.size is not None and o + w > t.size:
+                        continue
+                    if any(o < f.offset + f.width and f.offset < o + w for f in t.fields):
+                        continue
+                    t.fields.append(FieldType(o, w, ABSTAIN, evidence=STATIC_EVIDENCE))
+                    added += 1
+                t.fields.sort(key=lambda f: f.offset)
+        self.log.verbose(f"  static layouts: {added} fields added")
 
     def _placed(self, target):
         """Map an evidence target ((key), off) to (site, off), or None."""
@@ -729,7 +776,8 @@ class Tracer:
         t = self._types.get(site)
         if t is None:
             return None
-        return (t.shape, t.stride, tuple((f.offset, f.width, f.kind) for f in t.fields))
+        return (t.shape, t.stride, tuple((f.offset, f.width, f.kind) for f in t.fields
+                                         if f.evidence != STATIC_EVIDENCE))
 
     def _walk_root_vars(self, name, func_addr, raw_index, arg_index=None):
         site = self._root_type(func_addr, raw_index)
@@ -759,6 +807,29 @@ class Tracer:
     def _walk_values(self, vars_, mem, root):
         return [walker.value_of(v, mem, root, v.array == 1) for v in vars_]
 
+    _TEXT = frozenset(range(0x20, 0x7f)) | {0x09, 0x0a, 0x0d}
+
+    def _rodata_cstring(self, raw8):
+        """The text a pointer value names, if it is the START of a
+        NUL-terminated printable run (>= 2 chars) in .rodata - else None."""
+        if not raw8 or not self._rodata:
+            return None
+        v = int.from_bytes(raw8, "little") if isinstance(raw8, bytes) else raw8
+        lo, hi = self._rodata
+        if not lo <= v < hi:
+            return None
+        if v > lo:
+            prev = self._safe_read(v - 1, 1)
+            if prev != b"\0":
+                return None
+        blob = self._safe_read(v, min(4096, hi - v))
+        if not blob or b"\0" not in blob:
+            return None
+        text = blob[:blob.index(b"\0")]
+        if len(text) < 2 or any(c not in self._TEXT for c in text):
+            return None
+        return text.decode("ascii")
+
     def _global_walk(self, obj):
         """('ptr', vars) / ('struct', vars) for a global the walk handles."""
         if getattr(self.args, "no_walk_globals", False):
@@ -771,6 +842,17 @@ class Tracer:
         site = ("global", obj.address)
         T = self._types.get(site)
         res = None
+        if T is None and obj.size == 8 and getattr(self.args, "rodata_strings", False) \
+                and self._rodata_cstring(self._safe_read(obj.address, 8)) is not None:
+            res = ("string",)
+            cache[obj.address] = res
+            return res
+        if self._rodata and self._rodata[0] <= obj.address < self._rodata[1]:
+            # The read-only literal pool holds compiler constants, not program
+            # variables. Typing `3.45` as a double makes it comparable to a
+            # float argument of 3.45f, and Daikon's fuzzy float equality then
+            # asserts a false `arg == g`. Leave it as tier 8 prints it.
+            T = None
         if T is not None and obj.size == 8 and T.fields and T.fields[0].offset == 0 \
                 and T.fields[0].kind == "pointer" and T.fields[0].targets:
             tsites = {self._placed_site(t) for t in T.fields[0].targets}
@@ -816,9 +898,10 @@ class Tracer:
             out["types"][site_s(site)] = {
                 "shape": t.shape, "size": t.size, "stride": t.stride, "count": t.count,
                 "fields": [{"off": f.offset, "width": f.width, "kind": f.kind,
-                            "signed": f.signed,
+                            "signed": f.signed, "evidence": f.evidence,
                             "targets": [[site_s(x[0]), x[1]] for x in f.targets]}
                            for f in t.fields]}
+            out["types"][site_s(site)]["elem_struct"] = bool(t.elem_struct)
         for (func, raw), _ in self.root_sites.items():
             site = self._root_type(func, raw)
             if site is not None:
@@ -999,6 +1082,11 @@ class Tracer:
                 specs.append(VarSpec(obj.name, dec_type="double", rep_type="double",
                                      comparability=comp_of("float")))
                 continue
+            if gw and gw[0] == "string":
+                specs.append(VarSpec(obj.name, dec_type="char*",
+                                     rep_type="java.lang.String",
+                                     comparability=comp_of("string")))
+                continue
             if gw:
                 # The global itself as a hashcode, then the typed walk: for a
                 # pointer-holding global the object behind it (`g[..]`), for a
@@ -1076,6 +1164,15 @@ class Tracer:
             if gw:
                 mem = (blobs or {}).get("__mem__") or self._sample_memory(
                     (blobs or {}).get("__objmem__"), snap)
+                if gw[0] == "string":
+                    raw8 = self._global_bytes(snap, obj.address, 8)
+                    ptr = int.from_bytes(raw8, "little") if raw8 else 0
+                    text = self._rodata_cstring(ptr) if ptr else None
+                    if text is None and ptr and mem is not None:
+                        text = mem.cstring(ptr)
+                    out.append(walker._quote(text) if text is not None
+                               else ("null" if not ptr else NONSENSICAL))
+                    continue
                 if gw[0] == "float":
                     raw = self._global_bytes(snap, obj.address, gw[1])
                     out.append(self._decode_float(int.from_bytes(raw, "little"), gw[1])
