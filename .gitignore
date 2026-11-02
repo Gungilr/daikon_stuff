@@ -31,3 +31,4 @@ daikon-output/
 
 # REA type-recovery benchmark: cloned REBench, downloaded data, REA caches
 bench/
+/daikon

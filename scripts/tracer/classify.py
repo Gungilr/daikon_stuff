@@ -17,7 +17,7 @@ than an absent one.
 """
 from collections import Counter
 
-from .layout import SEXT, ZEXT, SSE
+from .layout import INT, SEXT, ZEXT, SSE
 
 POINTER, FLOAT, SINT, UINT, ABSTAIN = "pointer", "float", "int", "uint", "abstain"
 ARRAY_FIELD = "array_field"     # an array embedded in a struct: `s.c[]`
@@ -93,6 +93,11 @@ def classify_field(offset, ev):
     if sse:
         if cls.get(SEXT, 0) or cls.get(ZEXT, 0):
             return FieldType(offset, width, ABSTAIN, evidence="sse and extending loads")
+        # SSE and plain integer moves of the SAME width at one offset: a union
+        # read both ways, or a float copied through a GPR. Either way the
+        # evidence does not decide the type, and a guess could be wrong.
+        if cls.get(INT, 0) and set(ev.widths) == {width}:
+            return FieldType(offset, width, ABSTAIN, evidence="sse and integer at one offset")
         return FieldType(offset, width if width in (4, 8) else 8, FLOAT,
                          evidence="moved by SSE")
     signed = None

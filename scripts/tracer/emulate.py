@@ -782,6 +782,11 @@ class Tracer:
                                                  string_sites=self._string_sites)
                 if vars_:
                     res = ("ptr", vars_)
+        elif T is not None and T.shape == "scalar" and T.fields \
+                and T.fields[0].kind == "float" and T.fields[0].width in (4, 8):
+            # Phase 10 D, run-time form: an SSE instruction moved it, so it is
+            # a float or double - not the long tier 8 prints.
+            res = ("float", T.fields[0].width)
         elif T is not None and T.shape == T_ARRAY and T.elem_struct:
             vars_ = walker.plan_pointer_root(obj.name, site, self._types,
                                              self._deref_depth(),
@@ -990,6 +995,10 @@ class Tracer:
         specs = []
         for obj in self.global_objects:
             gw = self._global_walk(obj) if self._objects_enabled() else None
+            if gw and gw[0] == "float":
+                specs.append(VarSpec(obj.name, dec_type="double", rep_type="double",
+                                     comparability=comp_of("float")))
+                continue
             if gw:
                 # The global itself as a hashcode, then the typed walk: for a
                 # pointer-holding global the object behind it (`g[..]`), for a
@@ -1067,6 +1076,11 @@ class Tracer:
             if gw:
                 mem = (blobs or {}).get("__mem__") or self._sample_memory(
                     (blobs or {}).get("__objmem__"), snap)
+                if gw[0] == "float":
+                    raw = self._global_bytes(snap, obj.address, gw[1])
+                    out.append(self._decode_float(int.from_bytes(raw, "little"), gw[1])
+                               if raw else NONSENSICAL)
+                    continue
                 if gw[0] == "array":
                     out.append(obj.address)
                     out.extend(self._walk_values(gw[1], mem, obj.address))
