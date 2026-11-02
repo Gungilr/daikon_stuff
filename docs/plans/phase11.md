@@ -397,7 +397,28 @@ the higher-precision choice for this suite.
     the stack as initialised; poison also catches uninitialised stack bytes reached through
     pointers (crazy-test-1 −12, NestedStructTest −4).
 
-STEP6_PLACEHOLDER
+**Step 6 — static layouts (`--static-layouts`). Built; recall did not rise, because there was nothing to add.**
+- Producer: `scripts/rea_eval/static_layouts.py`. It strips the binary, runs REA/Ghidra
+  high p-code and `observe.py`, and keeps constant-offset dereferences per integer
+  parameter. It ran on all 41 binaries (~37 s each, 0 errors).
+- Consumer rules: a static field is added only to a site the run already typed as a
+  STRUCT, only if one static field agrees with an observed one, and only if it neither
+  overlaps an observed field nor runs past the object's size. It is added as ABSTAIN, so
+  the dtrace is unchanged (`test_static_layouts_add_abstain_fields_only`). This means
+  "declared" in the plan became "in the layout, never emitted": a value printed for a field
+  with no observed kind would be a type claim.
+- Measured with `layout_score.py --static`:
+  - 36 parameters have static fields; 22 reach a run-typed struct and agree.
+  - Of the 9 extra candidates, **every one is correctly rejected**:
+    - md5 and PointerTest's are past the end of the allocated object (Ghidra modelling a
+      buffer pointer as a bigger struct);
+    - crazy-test-1 and DisambigTest's overlap observed fields (wide copies).
+  - **0 fields added: layout precision and recall unchanged (94.9% / 85.1%).**
+- These -O0 test programs execute every constant-offset dereference they contain. Static
+  evidence matters where the run leaves paths unexecuted: the ReSym corpus, which the
+  emulator cannot drive until the fuzzing harness supplies inputs. The acceptance criterion
+  "layout recall rises" is **not met on this corpus**. The precision and soundness criteria
+  hold trivially.
 
 **Step 7 — heap shapes. Not built: gate failed.** Depth 3 adds 0 matched facts over depth 2
 on small-test and NestedStructTest (the gate needed > 20), and on the whole suite.
