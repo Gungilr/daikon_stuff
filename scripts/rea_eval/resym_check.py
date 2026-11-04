@@ -19,7 +19,9 @@ pointee facts; ReSym's own label for the exact-string score.
 
 Usage:
     python3 scripts/rea_eval/resym_check.py PRED.jsonl TRUTH.jsonl PCODE_DIR \
-        [--traces TRACE_DIR] [--examples N]
+        [--traces TRACE_DIR] [--examples N] [--list-contradicted OUT]
+--list-contradicted: write the vardecoder_test.jsonl line index of every function
+with >=1 parameter answer contradicted by static or trace evidence.
 TRACE_DIR: the tracer's <sha256>.dtrace for each stripped binary (its ENTER
 declarations type each integer-register argument void* / int from the values seen).
 PRED.jsonl: the authors' vardecoder_pred.jsonl (bin / input / output / predict).
@@ -152,18 +154,60 @@ def trace_check(claim, ttype):
     return "PASS", None
 
 
+def matched_params(d, tfuncs, raw):
+    """(addr, [(ordinal, var, truth type dict, label type)]) for one ReSym entry,
+    or (reason, None) when the function is skipped (same rules as main)."""
+    addr, n_ida, has_float = ida_signature(d["input"])
+    tf = tfuncs.get(addr) if addr else None
+    if tf is None:
+        return "fn_unmatched", None
+    if has_float:
+        return "fn_float_params", None
+    g = raw.get(addr)
+    if not g or "ops" not in g or len(g.get("parameters", [])) != n_ida:
+        return "fn_param_count_differs", None
+    lab = parse(d["output"])
+    out = []
+    for tp in tf["params"]:
+        v = f"a{tp['ordinal'] + 1}"
+        if v not in lab or lab[v][1].strip() == "-" or tp["ordinal"] >= n_ida:
+            continue
+        out.append((tp["ordinal"], v, tp["type"], lab[v][1]))
+    return addr, out
+
+
+def judge(B, ttypes, addr, ordinal, ptype):
+    """Combined verdict on one predicted type: FAIL if the static rules or the
+    trace contradict it, PASS if either supports it, else NO-EVIDENCE."""
+    claim = c_claim(ptype)
+    sv, _ = check(for_check(claim), B.evidence(B.param_obs(addr, ordinal)))
+    tv, _ = trace_check(claim, ttypes.get(ordinal)) if ttypes is not None else ("NO-EVIDENCE", None)
+    if "FAIL" in (sv, tv):
+        return "FAIL"
+    return "PASS" if "PASS" in (sv, tv) else "NO-EVIDENCE"
+
+
+def facts_right(ptype, true_type):
+    claim = c_claim(ptype)
+    true = truth_facts(true_type)
+    return correct(claim, true) if claim["kind"] != "named" else true["kind"] in ("struct", "union", "int")
+
+
 def main(argv):
     pred_path, truth_path, pcode_dir = argv[1:4]
     n_ex = int(argv[argv.index("--examples") + 1]) if "--examples" in argv else 0
     traces = load_traces(argv[argv.index("--traces") + 1]) if "--traces" in argv else {}
+    list_out = argv[argv.index("--list-contradicted") + 1] if "--list-contradicted" in argv else None
+    contradicted = set()
     T = collections.Counter()
     truth = {}
     for line in open(truth_path):
         t = json.loads(line)
         truth[os.path.basename(t["binary"])] = {f["addr"]: f for f in t["functions"]}
     preds = collections.defaultdict(list)
-    for line in open(pred_path):
+    for idx, line in enumerate(open(pred_path)):
         d = json.loads(line)
+        d["_idx"] = idx                 # line-aligned with vardecoder_test.jsonl
         if d.get("bin") in truth:
             preds[d["bin"]].append(d)
 
@@ -234,6 +278,8 @@ def main(argv):
                         if len(ex[key]) < n_ex:
                             ex[key].append(f"{d.get('funname')} {v}: ReSym {ptype!r}, truth {tp['type']['c']!r}, "
                                            f"tracer {ttype}")
+                if verdict == "FAIL" or (h in traces and addr in traces[h] and tv == "FAIL"):
+                    contradicted.add(d["_idx"])
                 if verdict == "FAIL":
                     for r in failed:
                         rules[(r, ok)] += 1
@@ -283,6 +329,10 @@ def main(argv):
         row("static + trace", None, "both:")
         print(f"  trace verdicts: PASS {T['PASS']}  FAIL {T['FAIL']}  NO-EVIDENCE {T['NO-EVIDENCE']}; "
               f"trace caught {T['FAIL'] - T['FAIL:ok']} of {n - T['ok']} wrong, rejected {T['FAIL:ok']} of {T['ok']} right")
+    if list_out:
+        with open(list_out, "w") as fh:
+            fh.write("\n".join(map(str, sorted(contradicted))) + "\n")
+        print(f"\n{len(contradicted)} functions with >=1 contradicted parameter answer -> {list_out}")
     for k, v in ex.items():
         print(f"\n{k}:")
         for x in v:

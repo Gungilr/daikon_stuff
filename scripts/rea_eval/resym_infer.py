@@ -17,7 +17,7 @@ gated bigcode/starcoderbase-3b the authors load (same git blob hashes).
 
 Usage:
     python3 scripts/rea_eval/resym_infer.py TEST.jsonl OUT.jsonl MODEL_DIR TOKENIZER_DIR \
-        [--n 200] [--seed 0] [--beams 4]
+        [--n 200] [--seed 0] [--beams 4] [--candidates K] [--only-idx FILE] [--exclude-idx FILE]
 Resumable: entries already in OUT.jsonl are skipped.
 """
 import argparse
@@ -46,10 +46,23 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--beams", type=int, default=4)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
+    ap.add_argument("--candidates", type=int, default=1,
+                    help="keep the K best beams (K <= --beams); stored as 'candidates'")
+    ap.add_argument("--only-idx", default=None,
+                    help="sample from these test-line indices (one per line) instead of all")
+    ap.add_argument("--exclude-idx", default=None,
+                    help="never sample these indices (e.g. a pilot's)")
     a = ap.parse_args()
+    assert 1 <= a.candidates <= a.beams
 
     lines = open(a.test).read().splitlines()
-    idx = sorted(random.Random(a.seed).sample(range(len(lines)), min(a.n, len(lines))))
+    pool = range(len(lines))
+    if a.only_idx:
+        pool = [int(x) for x in open(a.only_idx).read().split()]
+    if a.exclude_idx:
+        ex = {int(x) for x in open(a.exclude_idx).read().split()}
+        pool = [i for i in pool if i not in ex]
+    idx = sorted(random.Random(a.seed).sample(list(pool), min(a.n, len(pool))))
     done = set()
     if os.path.exists(a.out):
         done = {json.loads(l)["idx"] for l in open(a.out) if l.strip()}
@@ -70,18 +83,30 @@ def main():
             n_vars = max(len(asked_vars(line["input"])), 1)
             cap = 40 * n_vars + 16
             t0 = time.time()
-            out = model.generate(input_ids=ids, attention_mask=torch.ones_like(ids),
+            res = model.generate(input_ids=ids, attention_mask=torch.ones_like(ids),
                                  max_new_tokens=cap, num_beams=a.beams,
-                                 num_return_sequences=1, do_sample=False,
-                                 early_stopping=False, pad_token_id=0, eos_token_id=0)[0]
-            gen = out[ids.size(1):]
-            text = first + ":" + tok.decode(gen, skip_special_tokens=True,
-                                            clean_up_tokenization_spaces=True)
+                                 num_return_sequences=a.candidates, do_sample=False,
+                                 early_stopping=False, pad_token_id=0, eos_token_id=0,
+                                 return_dict_in_generate=True, output_scores=True)
+            texts, capped = [], []
+            for seq in res.sequences:
+                gen = seq[ids.size(1):]
+                while len(gen) and int(gen[-1]) == 0:     # beam padding / EOS
+                    gen = gen[:-1]
+                texts.append(first + ":" + tok.decode(gen, skip_special_tokens=True,
+                                                      clean_up_tokenization_spaces=True))
+                capped.append(len(gen) >= cap)
+            text = texts[0]
             rec = {"idx": i, "bin": line.get("bin"), "proj": line.get("proj"),
                    "funname": line.get("funname"), "output": line["output"],
                    "predict": text, "input_tokens": int(ids.size(1)),
-                   "capped": bool(len(gen) >= cap and int(gen[-1]) != 0),
+                   "capped": capped[0],
                    "seconds": round(time.time() - t0, 1)}
+            if a.candidates > 1:
+                rec["candidates"] = texts
+                rec["candidate_capped"] = capped
+                if getattr(res, "sequences_scores", None) is not None:
+                    rec["candidate_scores"] = [round(float(x), 4) for x in res.sequences_scores]
             wp.write(json.dumps(rec) + "\n")
             wp.flush()
             print(f"[{k + 1}/{len(idx)}] #{i} {rec['input_tokens']} tok, "
