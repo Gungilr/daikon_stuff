@@ -23,6 +23,7 @@ is the research output.
 | [phase11.md](phase11.md) | 10 | Object model: pointer provenance, per-allocation-site layouts, typed recursive traversal | **implemented** (tier 10): suite F1 19.6% → 24.3%, precision up; 0 unsound facts |
 | [../VERIFICATION.md](../VERIFICATION.md) | — | What can be formally verified, and what cannot | **reviewed** — 1 defect found |
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
+| [resym-rerank.md](resym-rerank.md) | — | Pick among ReSym's 4 beam candidates using binary evidence ([../RESYM-LOCAL.md](../RESYM-LOCAL.md)) | **planned** |
 
 Tier 4 was skipped after measurement, and re-measured after tier 5 landed: the
 range-based classifier in `memmap.py` now gets **7 of 7** pointers right
