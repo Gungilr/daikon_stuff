@@ -1,6 +1,6 @@
 # Plan — pick among ReSym's candidate answers using evidence from the binary
 
-Status: **planned, not started.** Prerequisite: `docs/RESYM-LOCAL.md` (local
+Status: **pilot done (2026-11-04): gate passed narrowly; main run not started.** Prerequisite: `docs/RESYM-LOCAL.md` (local
 VarDecoder run, and the evidence filter `scripts/rea_eval/resym_check.py`).
 
 ## Why
@@ -116,3 +116,22 @@ carry the alternative".
 
 About 5.5 h of CPU for model runs in total, no network beyond what is already
 downloaded, and no tracer changes.
+
+## Pilot result (20 functions, seed 0, 4 candidates)
+
+- 94 parameter answers; the top candidate is contradicted on 26, and only 26.9%
+  of those are right.
+- **Gate:** an alternative of a different type class exists for 6 of 26 (23.1%).
+  That passes the 15% gate, but on a small sample.
+- **Rerank:** 2 of 26 replaced (7.7%), both right, 0 regressions; 24 abstained.
+  Of the abstained, 7 had a right top answer.
+  - `rtnl_get_ts_device_callback a1`: `uint8_t*` -> `void*`, right.
+  - `_dwarf_write_sleb128 a3`: `uint64_t` -> `u64`. The truth is `int64_t`. The
+    scorer counts it right only because it treats an unknown name like `u64` as
+    "right if the truth is an integer". It is really a signedness miss.
+- "Keep only supported" picked the same 2.
+- Time: median 21 s per function, 9 min in total. Contradicted functions are
+  shorter than average.
+- **Reading:** the 4 beams almost never disagree on a parameter's type; they differ
+  in names. Criterion 1 (at least 30% replaced) is far off at 7.7%. With n = 26
+  its 95% interval is roughly 1–25%, so even the top of that range misses 30%.
