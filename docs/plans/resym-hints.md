@@ -1,6 +1,6 @@
 # Plan — ReSym parameter types as tracer hints, checked against the run
 
-Status: **planned.** Builds on `docs/RESYM-LOCAL.md` and `docs/plans/resym-rerank.md`.
+Status: **stopped at the Step 2 gate (2026-11-05)**: with perfect types the hints add +37 matched facts, under the +40 gate. Steps 3–5 not run. Builds on `docs/RESYM-LOCAL.md` and `docs/plans/resym-rerank.md`.
 
 ## Idea
 
@@ -166,3 +166,70 @@ Also report:
 - **ReSym:** about 20–90 s per reached function on this CPU, tens of minutes
   for the suite.
 - **Ghidra:** about 37 s per binary, once.
+
+## Results (2026-11-05)
+
+### Step 1: `--type-hints`, built
+- `scripts/tracer/hints.py` is pure: it handles candidates, effects, refutation
+  and selection. The hooks are in `emulate.py` and the flag in `cli.py`.
+- Effects:
+  - **E1:** `char*` becomes a `java.lang.String`; strings are captured at
+    sample time.
+  - **E2:** `T*` becomes `argN[..]` `T[]` elements.
+  - Both apply to arguments and the return value.
+- Refutation by the run:
+  - a non-address value refutes a pointer candidate;
+  - an address-valued slot refutes a scalar candidate;
+  - a non-text pointee refutes `char*`;
+  - an observed multi-field struct, a different access width, or float vs int
+    refutes `T*`.
+- **One run tests all candidates.** No re-execution is needed: a type changes
+  how memory is read, not what runs.
+- Gates:
+  - **Goldens:** unchanged without the flag.
+  - **Tests:** `tests_py/test_type_hints.py` (14 tests, including end-to-end
+    refutation and contested-abstain on a program compiled in the test).
+  - **Full suite:** 479 pass.
+- **Overhead:** none measurable. The suite's tracer time is 10.3 s → 10.5 s.
+
+### Step 2: oracle ceiling (DWARF hints, ORACLE, not a result)
+
+Runner: `scripts/rea_eval/suite_hints.py`. The baseline is reproduced exactly by
+the same runner without hints.
+
+| | ours | matched | precision | recall | F1 |
+|---|---|---|---|---|---|
+| tier 10 baseline (same runner, no hints) | 4,935 | 1,256 | 25.5% | 23.2% | 24.3% |
+| + DWARF hints (ORACLE ceiling) | 4,974 | **1,293** | 26.0% | 23.9% | 24.9% |
+
+- Per binary: IntTest +31, NestedStructTest +5, StaticArraysTest +4,
+  string-arrays +2, crazy-test-1 −4, static-struct −1.
+- Hint outcomes over the suite: 25 applied, 11 refuted, the rest had no effect
+  (struct pointers, scalars).
+- The refuted ones are the run disagreeing with a declared type for real
+  reasons:
+  - `returnIntSum` returns `(char****)0xDEADDEAD`, not an address;
+  - PointerTest's `char*` buffer still holds the poison fill;
+  - md5's `unsigned char*` buffers are touched by wide copies, which look like
+    a struct.
+- **Audit:** 0 violations (1,429 decidable facts true, 4,439 undecidable).
+- Daikon failures: 0.
+
+**Gate: failed narrowly.** It needed +40 matched and got +37; precision, audit
+and Daikon all pass. Perfect parameter types are worth +0.7 recall points on
+this suite, because what tier 10 misses is mostly globals (3,396), struct field
+layouts (411) and float/int parameter order (184), none of which a parameter
+type fixes.
+
+ReSym would deliver part of +37: its parameter facts are right about 82–91%
+of the time after filtering, and on Ghidra input, out of its training style,
+likely less. So the expected end-to-end gain is about +20–30 facts (+0.4–0.6
+recall points), for roughly 1 h of model CPU on the suite. That is why Steps 3–5
+were not run.
+
+### What would move the number instead
+- **Globals** (63% of all oracle facts): ReSym's VarDecoder does not type them.
+  Globals are where the misses are.
+- **Struct field types:** ReSym's FieldDecoder (4.8 GB, not downloaded) predicts
+  field names and types, which is the 411-fact class. The E1/E2 effects already
+  built would carry over to fields.

@@ -60,6 +60,7 @@ from .shadow import ShadowMap
 from .layout import Evidence, INT as ACC_INT, SEXT as ACC_SEXT, ZEXT as ACC_ZEXT, SSE as ACC_SSE
 from .classify import classify_all, ARRAY as T_ARRAY
 from . import walk as walker
+from . import hints as type_hints
 
 # Allocator functions the tier-5 model intercepts. printf and friends stay
 # generically skipped - modelling output has no bearing on invariants.
@@ -248,6 +249,12 @@ class Tracer:
         self._data_ranges = []      # data sections, as [lo, hi)
         self._rodata = None
         self.shadow = None          # --shadow: heap definedness, per byte
+        # --type-hints: candidate types per (func, raw slot), the count of
+        # non-null values that were not C strings, and the effect decided at
+        # finalize (None = abstain).
+        self._hints = {}
+        self._hint_string_bad = {}
+        self._hint_effect = {}
 
     # ---- Filtering ----
     def _filter_functions(self, functions):
@@ -616,12 +623,86 @@ class Tracer:
             roots += self._global_pointer_roots()
         regions = walker.capture(roots, self._obj_extent, self._safe_read,
                                  self._deref_depth() + 1)
+        if self._hints:
+            self._capture_hinted_strings(func_addr, values, start, regions)
         if self.shadow is not None:
             # Definedness travels with the bytes: by finalize it has changed.
             masks = {b: self.shadow.mask(b) for b in regions}
             regions = {"__regions__": regions,
                        "__masks__": {b: m for b, m in masks.items() if m is not None}}
         return regions
+
+    def _capture_hinted_strings(self, func_addr, values, start, regions):
+        """--type-hints: for a slot with a char* candidate, keep the C string
+        its value points at (the bytes are gone by finalize) and count the
+        values that are NOT one - the run's refutation of that candidate."""
+        for raw_index in range(start, min(len(values), 1 + type_hints.N_REG_ARGS)):
+            cands = self._hints.get((func_addr, raw_index))
+            if not cands or not type_hints.wants_string(cands):
+                continue
+            v = values[raw_index]
+            if not v:
+                continue
+            blob = self._read_cstring_bytes(v)
+            key = (func_addr, raw_index)
+            if not type_hints.is_cstring(blob):
+                self._hint_string_bad[key] = self._hint_string_bad.get(key, 0) + 1
+                continue
+            end = blob.find(b"\0")
+            have = any(b <= v and v + end + 1 <= b + len(r) for b, r in regions.items()
+                       if isinstance(b, int))
+            if not have:
+                regions[v] = blob[:end + 1]
+
+    def _read_cstring_bytes(self, v):
+        """Up to MAX_STRING bytes from v, stopping at the first NUL or at
+        unmapped memory (read page by page)."""
+        out = b""
+        addr = v
+        while len(out) < type_hints.MAX_STRING:
+            n = min(0x1000 - (addr & 0xFFF), type_hints.MAX_STRING - len(out))
+            chunk = self._safe_read(addr, n)
+            if chunk is None:
+                return out or None
+            out += chunk
+            if b"\0" in chunk:
+                break
+            addr += n
+        return out
+
+    def _decide_hints(self):
+        """At finalize: the effect for each hinted slot, or abstain."""
+        stats = {}
+        for key, cands in sorted(self._hints.items()):
+            func_addr, raw_index = key
+            if key not in self.slot_values:
+                continue                     # never sampled: nothing to apply
+            slot = self._slot_type(func_addr, raw_index)
+            nonzero = self.slot_values.get(key, NULL) != NULL
+            site = self._root_type(func_addr, raw_index) if slot == POINTER else None
+            T = self._types.get(site) if site is not None else None
+            eff, status, why = type_hints.select(
+                cands, slot, nonzero, self._hint_string_bad.get(key, 0), T)
+            stats[status] = stats.get(status, 0) + 1
+            if eff is not None:
+                self._hint_effect[key] = eff
+            self.log.verbose(f"  hint func=0x{func_addr:x} slot={raw_index} {status}"
+                             f" effect={eff} refuted={why}")
+        if stats:
+            self.log.info("[+] Type hints:      " + ", ".join(
+                f"{k} {v}" for k, v in sorted(stats.items())))
+
+    def _hint_string(self, func_addr, raw_index):
+        e = self._hint_effect.get((func_addr, raw_index))
+        return bool(e) and e[0] == type_hints.STRING
+
+    def _string_value(self, v, mem):
+        if not v:
+            return "null"
+        text = self._rodata_cstring(v)
+        if text is None and mem is not None:
+            text = mem.cstring(v)
+        return walker._quote(text) if text is not None else NONSENSICAL
 
     def _sample_memory(self, objmem, gsnap):
         masks = None
@@ -680,6 +761,8 @@ class Tracer:
         self._string_sites = frozenset([("rodata",)])
         if getattr(self.args, "static_layouts", None):
             self._apply_static_layouts(self.args.static_layouts)
+        if self._hints:
+            self._decide_hints()
         for site, t in sorted(self._types.items(), key=lambda kv: repr(kv[0])):
             self.log.verbose(f"  type {t!r}")
         if getattr(self.args, "dump_layouts", None):
@@ -780,6 +863,15 @@ class Tracer:
                                          if f.evidence != STATIC_EVIDENCE))
 
     def _walk_root_vars(self, name, func_addr, raw_index, arg_index=None):
+        eff = self._hint_effect.get((func_addr, raw_index))
+        if eff and eff[0] == type_hints.ARRAY_EFFECT:
+            # --type-hints: T * with T scalar, not refuted by the run - the
+            # pointee as T[] elements, Kvasir's `u[..]`.
+            _, w, kind, signed = eff
+            dec, rep, comp = walker._scalar_types(kind, True)
+            return [walker.Var(f"{name}[..]", dec, rep, comp + "[]", [],
+                               ("seq", w, w, kind, signed, None), var_kind="array",
+                               enclosing=name, array=1)]
         site = self._root_type(func_addr, raw_index)
         vars_ = []
         if site is not None:
@@ -2023,6 +2115,11 @@ class Tracer:
         specs = []
         for i in range(n_reg + n_stack):
             kind = self._slot_type(func_addr, self._arg_raw_index(i, n_reg))
+            if self._hint_string(func_addr, self._arg_raw_index(i, n_reg)):
+                specs.append(VarSpec(f"arg{i}", dec_type="char*",
+                                     rep_type="java.lang.String",
+                                     comparability=comp_of("string")))
+                continue
             specs.append(VarSpec(
                 f"arg{i}",
                 dec_type="int" if kind != POINTER else "void*",
@@ -2060,7 +2157,8 @@ class Tracer:
         if self._objects_enabled():
             for i in range(n_reg + n_stack):
                 raw_index = self._arg_raw_index(i, n_reg)
-                if self._slot_type(func_addr, raw_index) == POINTER:
+                if (self._slot_type(func_addr, raw_index) == POINTER
+                        and not self._hint_string(func_addr, raw_index)):
                     specs.extend(self._walk_specs(
                         self._walk_root_vars(f"arg{i}", func_addr, raw_index, i),
                         comp_of))
@@ -2074,7 +2172,8 @@ class Tracer:
         if (is_exit and self._objects_enabled()
                 and self._emits_return(func_addr)
                 and self._slot_type(func_addr, 0) == POINTER
-                and self.arity.returns_value(func_addr)):
+                and self.arity.returns_value(func_addr)
+                and not self._hint_string(func_addr, 0)):
             specs.extend(self._walk_specs(
                 self._walk_root_vars("return", func_addr, 0), comp_of))
         elif (is_exit and self._deref_enabled()
@@ -2103,6 +2202,10 @@ class Tracer:
                 specs.append(VarSpec(
                     "return", dec_type="double", rep_type="double",
                     comparability=comp_of("float")))
+            elif self._hint_string(func_addr, 0):
+                specs.append(VarSpec("return", dec_type="char*",
+                                     rep_type="java.lang.String",
+                                     comparability=comp_of("string")))
             else:
                 kind = self._slot_type(func_addr, 0)
                 specs.append(VarSpec(
@@ -2247,8 +2350,17 @@ class Tracer:
         # zero-extend, so -1 arrives as 0x00000000FFFFFFFF; reported raw, Daikon
         # infers `> 0` where the truth is `< 0`.
         out = []
+        mem = None
+        if self._objects_enabled():
+            mem = self._sample_memory((blobs or {}).get("__objmem__"),
+                                      (blobs or {}).get("__gsnap__"))
+            if blobs is not None:
+                blobs["__mem__"] = mem
         for i in range(n_reg + n_stack):
             v = raw[self._arg_raw_index(i, n_reg)]
+            if self._hint_string(func_addr, self._arg_raw_index(i, n_reg)):
+                out.append(self._string_value(v, mem))
+                continue
             out.append(sign_extend(v, self.arity.arg_width(func_addr, i)))
         if self._float_enabled():
             for i in range(self.arity.sse_arity(func_addr)):
@@ -2257,15 +2369,11 @@ class Tracer:
                 out.append(self._decode_float(
                     bits, self.arity.sse_width(func_addr, i)))
 
-        mem = None
         if self._objects_enabled():
-            mem = self._sample_memory((blobs or {}).get("__objmem__"),
-                                      (blobs or {}).get("__gsnap__"))
-            if blobs is not None:
-                blobs["__mem__"] = mem
             for i in range(n_reg + n_stack):
                 raw_index = self._arg_raw_index(i, n_reg)
-                if self._slot_type(func_addr, raw_index) == POINTER:
+                if (self._slot_type(func_addr, raw_index) == POINTER
+                        and not self._hint_string(func_addr, raw_index)):
                     out.extend(self._walk_values(
                         self._walk_root_vars(f"arg{i}", func_addr, raw_index, i),
                         mem, raw[raw_index]))
@@ -2274,7 +2382,8 @@ class Tracer:
         if (is_exit and self._objects_enabled()
                 and self._emits_return(func_addr)
                 and self._slot_type(func_addr, 0) == POINTER
-                and self.arity.returns_value(func_addr)):
+                and self.arity.returns_value(func_addr)
+                and not self._hint_string(func_addr, 0)):
             out.extend(self._walk_values(self._walk_root_vars("return", func_addr, 0),
                                          mem, raw[0]))
         elif (is_exit and self._deref_enabled()
@@ -2297,6 +2406,9 @@ class Tracer:
                 idx = self._sse_raw_index(0, n_reg, n_stack)
                 out.append(self._decode_float(
                     raw[idx] if idx < len(raw) else 0, sse_ret))
+                return out
+            if self._hint_string(func_addr, 0):
+                out.append(self._string_value(raw[0], mem))
                 return out
             width = self.arity.return_width(func_addr)
             if self.arity.return_is_unsigned(func_addr):
@@ -2367,6 +2479,11 @@ class Tracer:
         # 1. Find functions (symbol table or prologue scan)
         excluded = set() if self.args.no_default_exclude else set(DEFAULT_EXCLUDED)
         self.log.info(f"[+] Loading ELF: {self.args.binary}")
+        if getattr(self.args, "type_hints", None):
+            if self._objects_enabled():
+                self._hints = type_hints.load(self.args.type_hints)
+            else:
+                self.log.info("[!] --type-hints needs --tier 10; ignored")
         all_funcs, self.is_64bit, self.entry_point, self.segments = \
             find_functions(
                 self.args.binary,

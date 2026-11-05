@@ -221,6 +221,13 @@ def build_parser():
                            "only to struct types the run already established, "
                            "and never one that contradicts a run-time access.")
 
+    heur.add_argument("--type-hints", metavar="PATH",
+                      help="Tier 10: JSON of candidate C types per argument/return "
+                           "(scripts/tracer/hints.py). A candidate's effect - char* "
+                           "as a string, T* as T[] elements - is applied only when "
+                           "the run refutes none of the surviving candidates and "
+                           "they all agree; otherwise the tracer abstains.")
+
     heur.add_argument("--poison-uninitialized", action="store_true",
                       help="Tier 6+: fill fresh stack pages and heap allocations "
                            "with a pattern, and report a field still holding it "
