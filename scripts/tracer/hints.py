@@ -22,7 +22,8 @@ Effects:
 """
 import json
 
-from .classify import FLOAT, SINT, UINT, STRUCT, ARRAY, SCALAR as T_SCALAR, ABSTAIN
+from .classify import (FLOAT, SINT, UINT, STRUCT, ARRAY, SCALAR as T_SCALAR, ABSTAIN,
+                       POINTER as F_POINTER, ARRAY_FIELD, FieldType, TypeInfo)
 from .memmap import POINTER, SCALAR
 
 STRING = "string"
@@ -47,6 +48,19 @@ def load(path):
         if spec.get("return"):
             out[(a, 0)] = list(spec["return"])
     return out
+
+
+def load_all(path):
+    """{"slots": load()'s map, "globals": {addr: [candidate, ...]},
+    "observed_only": bool} - the full file, struct layouts included."""
+    with open(path) as fh:
+        data = json.load(fh)
+    globs = {}
+    for a, cands in (data.get("globals") or {}).items():
+        if cands:
+            globs[int(a, 16) if isinstance(a, str) else int(a)] = list(cands)
+    return {"slots": load(path), "globals": globs,
+            "observed_only": bool(data.get("observed_fields_only"))}
 
 
 def effect(c):
@@ -135,3 +149,112 @@ def wants_string(cands):
 # SCALAR re-exported for callers that classify slots
 __all__ = ["load", "effect", "is_cstring", "refuted", "select", "wants_string",
            "STRING", "ARRAY_EFFECT", "POINTER", "SCALAR"]
+
+
+# ------------------------------------------------------------ struct layouts
+HINT_EVIDENCE = "type hint"
+
+
+def struct_layout(c):
+    """The struct layout a candidate carries for what it points at, or None."""
+    if not c or c.get("kind") != "pointer":
+        return None
+    p = c.get("pointee") or {}
+    return p if p.get("kind") == "struct" and p.get("fields") else None
+
+
+def _int_kind(f):
+    return UINT if f.get("signed") is False else SINT
+
+
+def leaves(layout):
+    """[(FieldType, nested struct layout or None)] for a hinted struct layout."""
+    out = []
+    for f in layout.get("fields") or []:
+        off, size, k = f.get("off"), f.get("size"), f.get("kind")
+        if not isinstance(off, int) or not size:
+            continue
+        if k == "int":
+            out.append((FieldType(off, size, _int_kind(f), f.get("signed") is not False,
+                                  evidence=HINT_EVIDENCE), None))
+        elif k == "float":
+            out.append((FieldType(off, size, FLOAT, evidence=HINT_EVIDENCE), None))
+        elif k == "pointer":
+            pe = f.get("pointee") or {}
+            hint = "cstring" if pe.get("kind") == "char" else None
+            nested = pe if pe.get("kind") == "struct" and pe.get("fields") else None
+            out.append((FieldType(off, 8, F_POINTER, evidence=HINT_EVIDENCE, hint=hint), nested))
+        elif k == "chararray":
+            out.append((FieldType(off, size, ARRAY_FIELD, True, evidence=HINT_EVIDENCE,
+                                  stride=1, count=size, elem_kind=SINT, hint="chararray"), None))
+        elif k == "array":
+            e = f.get("elem") or {}
+            w = e.get("size")
+            ek = {"float": FLOAT, "pointer": F_POINTER}.get(e.get("kind"), _int_kind(e))
+            if w and f.get("count"):
+                out.append((FieldType(off, size, ARRAY_FIELD, e.get("signed") is not False,
+                                      evidence=HINT_EVIDENCE, stride=w, count=f["count"],
+                                      elem_kind=ek), None))
+    return out
+
+
+def _kclass(kind):
+    if kind == FLOAT:
+        return "f"
+    if kind in (SINT, UINT):
+        return "i"
+    if kind == F_POINTER:
+        return "p"
+    return None
+
+
+def merge(site, layout, observed, *, stride=None, count=None, observed_only=False):
+    """(TypeInfo, [(pointer field, nested layout)]) for a hinted layout the
+    run does not contradict, or (None, reason). `stride`/`count` make it an array of `layout` structs.
+
+    Refuted by an observed field with exactly a hinted field's offset and
+    width but another kind, or by an access past the hinted size. A wide
+    access over several hinted fields (a copy, a zeroing store) is not a
+    contradiction: those are the run's own known false fields.
+    """
+    size = layout.get("size") or 0
+    hl = leaves(layout)
+    obs = [f for f in (observed.fields if observed is not None else [])]
+    unit = stride or size
+
+    def local(o):
+        return o % unit if stride and unit else o
+
+    by_pos = {(f.offset, f.width): f for f, _ in hl}
+    for o in obs:
+        if o.kind == ABSTAIN or o.kind == ARRAY_FIELD:
+            continue
+        off = local(o.offset)
+        if size and not stride and o.offset + o.width > size:
+            return None, "accessed past the hinted size"
+        h = by_pos.get((off, o.width))
+        if h is not None and _kclass(h.kind) and _kclass(o.kind) \
+                and _kclass(h.kind) != _kclass(o.kind):
+            return None, f"field +{off} is {o.kind}, hint says {h.kind}"
+    kept = []
+    for f, nested in hl:
+        if observed_only:
+            touched = any(local(o.offset) < f.offset + f.width
+                          and f.offset < local(o.offset) + o.width for o in obs)
+            if not touched:
+                continue
+        if f.kind == F_POINTER:
+            for o in obs:
+                if local(o.offset) == f.offset and o.width == 8 and o.targets:
+                    f.targets = tuple(o.targets)
+                    break
+        kept.append((f, nested))
+    if not kept:
+        return None, "no field left"
+    fields = [f for f, _ in kept]
+    if stride:
+        t = TypeInfo(site, ARRAY, stride * (count or 0), fields, stride=stride, count=count,
+                     elem_struct=True, hinted=True)
+    else:
+        t = TypeInfo(site, STRUCT, size, fields, hinted=True)
+    return t, [(f, n) for f, n in kept if n is not None]

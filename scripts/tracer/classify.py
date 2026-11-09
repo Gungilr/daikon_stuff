@@ -29,10 +29,10 @@ POINTER_WIDTH = 8
 
 class FieldType:
     __slots__ = ("offset", "width", "kind", "signed", "targets", "evidence",
-                 "stride", "count", "elem_kind")
+                 "stride", "count", "elem_kind", "hint")
 
     def __init__(self, offset, width, kind, signed=None, targets=(), evidence="",
-                 stride=None, count=None, elem_kind=None):
+                 stride=None, count=None, elem_kind=None, hint=None):
         self.offset = offset
         self.width = width
         self.kind = kind
@@ -42,6 +42,9 @@ class FieldType:
         self.stride = stride          # ARRAY_FIELD only
         self.count = count
         self.elem_kind = elem_kind
+        # --type-hints layouts: "cstring" (a char * field, printed as a string)
+        # or "chararray" (a char[N] field, printed as an inline string).
+        self.hint = hint
 
     def __repr__(self):
         t = f" ->{list(self.targets)}" if self.targets else ""
@@ -51,7 +54,7 @@ class FieldType:
 
 class TypeInfo:
     def __init__(self, site, shape, size=None, fields=(), stride=None, count=None,
-                 elem_struct=False):
+                 elem_struct=False, hinted=False):
         self.site = site
         self.shape = shape
         self.size = size
@@ -61,6 +64,9 @@ class TypeInfo:
         # Array of structs: `fields` are the ELEMENT's fields, offsets within
         # one element of `stride` bytes.
         self.elem_struct = elem_struct
+        # From a --type-hints layout (not refuted by the run): a struct even
+        # when its fields are uniform, which access evidence alone cannot say.
+        self.hinted = hinted
 
     def pointer_fields(self):
         return [f for f in self.fields if f.kind == POINTER and f.targets]

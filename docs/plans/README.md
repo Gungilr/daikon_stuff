@@ -25,6 +25,7 @@ is the research output.
 | [../FORMAL-METHODS.md](../FORMAL-METHODS.md) | — | Formal methods layered on the heuristics | **reviewed** — 0/72 shapes are forced by the evidence |
 | [resym-rerank.md](resym-rerank.md) | — | Pick among ReSym's 4 beam candidates using binary evidence ([../RESYM-LOCAL.md](../RESYM-LOCAL.md)) | **pilot**: 2 of 26 contradicted answers replaced (7.7%), both right |
 | [resym-hints.md](resym-hints.md) | — | ReSym parameter types as tracer hints, refuted by the run | **stopped at gate**: perfect types add +37 matched (gate +40); `--type-hints` built |
+| [struct-hints.md](struct-hints.md) | — | Struct layouts as tracer hints (ORACLE ceilings) | **measured**: touched fields +224 (F1 29.6%), full layouts +521 (F1 34.4%) |
 
 Tier 4 was skipped after measurement, and re-measured after tier 5 landed: the
 range-based classifier in `memmap.py` now gets **7 of 7** pointers right

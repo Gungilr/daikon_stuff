@@ -76,10 +76,11 @@ def plan_pointer_root(name, site, types, depth, *, in_array=False, path=None,
                    ("seqhash", T.stride, T.count), var_kind="array",
                    enclosing=name, array=1)]
         for f in T.fields:
-            if f.kind == ABSTAIN:
-                continue
+            if f.kind == ABSTAIN or f.kind == ARRAY_FIELD:
+                continue        # Daikon has no arrays of arrays
             fname = f"{obj}.off{f.offset}"
-            if f.kind == POINTER and f.targets and f.targets[0][0] in string_sites:
+            if f.kind == POINTER and (f.hint == "cstring" or (
+                    f.targets and f.targets[0][0] in string_sites)):
                 out.append(Var(fname, "char*[]", "java.lang.String[]", "string[]", path,
                                ("seqstring", T.stride, f.offset, T.count),
                                var_kind=f"field off{f.offset}", enclosing=obj, array=1))
@@ -124,6 +125,13 @@ def _struct_fields(prefix, T, types, depth, path, visited, *, in_array, sep,
             continue
         fname = f"{prefix}{sep}off{f.offset}"
         arr = 1 if in_array else None
+        if f.kind == ARRAY_FIELD and f.hint == "chararray":
+            # A hinted char[N] member: Kvasir prints it as a string.
+            out.append(Var(fname, "char*" + ("[]" if in_array else ""),
+                           "java.lang.String" + ("[]" if in_array else ""),
+                           "string", path, ("inline_string", f.offset, f.count),
+                           var_kind=f"field off{f.offset}", enclosing=prefix, array=arr))
+            continue
         if f.kind == ARRAY_FIELD:
             # Daikon has no arrays of arrays, so an embedded array is only
             # expressible outside a sequence context: `g.off8[..]`.
@@ -136,7 +144,8 @@ def _struct_fields(prefix, T, types, depth, path, visited, *, in_array, sep,
                            ("seq", f.stride, f.stride, f.elem_kind, f.signed, f.count),
                            var_kind="array", enclosing=fname, array=1))
             continue
-        if f.kind == POINTER and f.targets and f.targets[0][0] in string_sites:
+        if f.kind == POINTER and (f.hint == "cstring" or (
+                f.targets and f.targets[0][0] in string_sites)):
             out.append(Var(fname, "char*" + ("[]" if in_array else ""),
                            "java.lang.String" + ("[]" if in_array else ""),
                            "string", path, ("string", f.offset),
@@ -163,7 +172,7 @@ def _struct_fields(prefix, T, types, depth, path, visited, *, in_array, sep,
 def plan_struct_global(name, site, types, depth, string_sites=frozenset()):
     """Vars for a global whose OWN storage is a struct: `g.offK` fields."""
     T = types.get(site)
-    if T is None or T.shape != STRUCT or len(T.fields) < 2:
+    if T is None or T.shape != STRUCT or (len(T.fields) < 2 and not T.hinted):
         return []
     return _struct_fields(name, T, types, depth, [], {site}, in_array=False,
                           sep=".", string_sites=string_sites)
@@ -284,6 +293,12 @@ def value_of(var, mem, root, in_array):
         _, off, w, kind, signed = leaf
         v = _decode(mem.read(base + off, w), w, kind, signed)
         return NONSENSICAL if v is None else wrap(v)
+    if leaf[0] == "inline_string":
+        raw = mem.read(base + leaf[1], leaf[2])
+        if raw is None:
+            return NONSENSICAL
+        end = raw.find(b"\0")
+        return wrap(_quote(raw[:end if end >= 0 else len(raw)].decode("latin-1")))
     if leaf[0] == "string":
         raw = mem.read(base + leaf[1], 8)
         if raw is None:

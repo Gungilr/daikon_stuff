@@ -253,6 +253,8 @@ class Tracer:
         # non-null values that were not C strings, and the effect decided at
         # finalize (None = abstain).
         self._hints = {}
+        self._hint_globals = {}         # global address -> [candidate layouts]
+        self._hint_observed_only = False
         self._hint_string_bad = {}
         self._hint_effect = {}
 
@@ -692,6 +694,93 @@ class Tracer:
             self.log.info("[+] Type hints:      " + ", ".join(
                 f"{k} {v}" for k, v in sorted(stats.items())))
 
+    def _apply_struct_hints(self):
+        """--type-hints struct layouts: make each hinted object's type the
+        layout, unless the run contradicts it (hints.merge). Objects: what an
+        argument or return points at, a struct global, a global array of
+        structs, what a pointer global points at, and - one level down - what
+        a hinted pointer field points at, where the run saw its target."""
+        stats = {}
+        done = {}
+
+        def same(cands):
+            first = json.dumps(cands[0], sort_keys=True)
+            return all(json.dumps(c, sort_keys=True) == first for c in cands)
+
+        def apply(site, layout, depth, stride=None, count=None):
+            key = json.dumps(layout, sort_keys=True)
+            if site in done:
+                if done[site] != key:
+                    stats["conflicting layouts"] = stats.get("conflicting layouts", 0) + 1
+                return
+            done[site] = key
+            t, extra = type_hints.merge(site, layout, self._types.get(site),
+                                        stride=stride, count=count,
+                                        observed_only=self._hint_observed_only)
+            if t is None:
+                k = "no observed field" if extra == "no field left" else "refuted"
+                stats[k] = stats.get(k, 0) + 1
+                self.log.verbose(f"  struct hint {site!r} refuted: {extra}")
+                return
+            self._types[site] = t
+            stats["applied"] = stats.get("applied", 0) + 1
+            self.log.verbose(f"  struct hint {site!r} applied: {t!r}")
+            if depth >= self._deref_depth():
+                return
+            for f, nested in extra:
+                if not f.targets:
+                    # The run never followed this field, but the layout says
+                    # what it points at: a synthetic site typed by the hint,
+                    # read from each sample's captured memory by the walk.
+                    f.targets = ((synthetic(nested), 0),)
+                for tsite in {self._placed_site(x) for x in f.targets} - {None}:
+                    apply(tsite, nested, depth + 1)
+
+        def synthetic(layout):
+            return ("hint", json.dumps(layout, sort_keys=True))
+
+        objs = {o.address: o for o in self.global_objects}
+        for addr, cands in sorted(self._hint_globals.items()):
+            if addr not in objs or not same(cands):
+                continue
+            c = cands[0]
+            site = ("global", addr)
+            if c.get("kind") == "struct" and c.get("fields"):
+                apply(site, c, 0)
+            elif c.get("kind") == "array" and (c.get("elem") or {}).get("fields"):
+                e = c["elem"]
+                apply(site, e, 0, stride=e.get("size"), count=c.get("count"))
+            elif type_hints.struct_layout(c) and objs[addr].size == 8:
+                T = self._types.get(site)
+                layout = type_hints.struct_layout(c)
+                if T is None or not T.fields or T.fields[0].offset != 0 \
+                        or T.fields[0].kind != "pointer" or not T.fields[0].targets:
+                    if T is not None and any(f.kind not in ("pointer", "abstain")
+                                             for f in T.fields):
+                        stats["refuted"] = stats.get("refuted", 0) + 1
+                        continue
+                    # A pointer global the run never followed: its own type
+                    # is the pointer, its target typed by the hint.
+                    from .classify import FieldType, TypeInfo
+                    T = TypeInfo(site, "scalar", 8, [FieldType(
+                        0, 8, "pointer", targets=((synthetic(layout), 0),),
+                        evidence=type_hints.HINT_EVIDENCE)], hinted=True)
+                    self._types[site] = T
+                for tsite in {self._placed_site(x) for x in T.fields[0].targets} - {None}:
+                    apply(tsite, layout, 1)
+        for key, cands in sorted(self._hints.items()):
+            layout = type_hints.struct_layout(cands[0])
+            if layout is None or not same(cands):
+                continue
+            for t in self.root_sites.get(key, {}):
+                p = self._placed(t)
+                if p is not None and p[1] == 0:
+                    apply(p[0], layout, 1)
+        self._root_type_cache = {}
+        if stats:
+            self.log.info("[+] Struct hints:    " + ", ".join(
+                f"{k} {v}" for k, v in sorted(stats.items())))
+
     def _hint_string(self, func_addr, raw_index):
         e = self._hint_effect.get((func_addr, raw_index))
         return bool(e) and e[0] == type_hints.STRING
@@ -761,6 +850,8 @@ class Tracer:
         self._string_sites = frozenset([("rodata",)])
         if getattr(self.args, "static_layouts", None):
             self._apply_static_layouts(self.args.static_layouts)
+        if self._hints or self._hint_globals:
+            self._apply_struct_hints()
         if self._hints:
             self._decide_hints()
         for site, t in sorted(self._types.items(), key=lambda kv: repr(kv[0])):
@@ -967,8 +1058,8 @@ class Tracer:
                                              string_sites=self._string_sites)
             if vars_:
                 res = ("array", vars_)
-        elif T is not None and T.shape == "struct" and len(T.fields) >= 2 \
-                and len({(f.width, f.kind) for f in T.fields}) >= 2:
+        elif T is not None and T.shape == "struct" and (T.hinted or (
+                len(T.fields) >= 2 and len({(f.width, f.kind) for f in T.fields}) >= 2)):
             vars_ = walker.plan_struct_global(obj.name, site, self._types,
                                               self._deref_depth(),
                                               string_sites=self._string_sites)
@@ -2481,7 +2572,10 @@ class Tracer:
         self.log.info(f"[+] Loading ELF: {self.args.binary}")
         if getattr(self.args, "type_hints", None):
             if self._objects_enabled():
-                self._hints = type_hints.load(self.args.type_hints)
+                allh = type_hints.load_all(self.args.type_hints)
+                self._hints = allh["slots"]
+                self._hint_globals = allh["globals"]
+                self._hint_observed_only = allh["observed_only"]
             else:
                 self.log.info("[!] --type-hints needs --tier 10; ignored")
         all_funcs, self.is_64bit, self.entry_point, self.segments = \

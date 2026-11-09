@@ -158,3 +158,87 @@ def test_e2e_refuted_and_contested_change_nothing(built):
                    "abstain")
     assert "all-refuted 1" in log and "contested 1" in log
     assert dt == base
+
+
+# ------------------------------------------------------------ struct layouts
+from tracer.classify import ARRAY as T_ARRAY, FLOAT as K_FLOAT, POINTER as K_PTR  # noqa: E402
+
+LAYOUT = {"kind": "struct", "size": 24, "fields": [
+    {"off": 0, "size": 4, "kind": "int", "signed": True},
+    {"off": 8, "size": 8, "kind": "pointer", "pointee": {"kind": "char", "size": 1}},
+    {"off": 16, "size": 8, "kind": "float"}]}
+
+
+def _obs(*fields):
+    return TypeInfo(("heap", 1), STRUCT, 24, [FieldType(*f) for f in fields])
+
+
+def test_layout_leaves_and_string_field():
+    t, nested = hints.merge(("heap", 1), LAYOUT, None)
+    assert t.hinted and t.shape == STRUCT and [f.offset for f in t.fields] == [0, 8, 16]
+    assert t.fields[1].hint == "cstring" and t.fields[2].kind == K_FLOAT and nested == []
+
+
+def test_layout_refuted_by_a_kind_clash():
+    t, why = hints.merge(("heap", 1), LAYOUT, _obs((16, 8, SINT, True)))
+    assert t is None and "hint says float" in why
+
+
+def test_layout_refuted_by_access_past_its_size():
+    t, why = hints.merge(("heap", 1), LAYOUT, _obs((24, 4, SINT, True)))
+    assert t is None and "past" in why
+
+
+def test_wide_copy_is_not_a_contradiction():
+    # an 8-byte copy over the 4-byte int at +0 (and its padding) is not a clash
+    t, _ = hints.merge(("heap", 1), LAYOUT, _obs((0, 8, SINT, True)))
+    assert t is not None
+
+
+def test_observed_only_keeps_touched_fields_and_their_targets():
+    t, _ = hints.merge(("heap", 1), LAYOUT,
+                       _obs((8, 8, K_PTR, None, ((("rodata",), 0),))), observed_only=True)
+    assert [f.offset for f in t.fields] == [8] and t.fields[0].targets == ((("rodata",), 0),)
+    assert hints.merge(("heap", 1), LAYOUT, None, observed_only=True) == (None, "no field left")
+
+
+def test_array_of_structs_layout():
+    t, _ = hints.merge(("global", 0x404040), LAYOUT, _obs((24, 4, SINT, True)),
+                       stride=24, count=3)
+    assert t.shape == T_ARRAY and t.elem_struct and t.count == 3 and t.stride == 24
+
+
+STRUCT_SRC = r"""
+struct item { int id; const char *name; double w; };
+struct item one = {1, "one", 1.5};
+struct item solo = {7, "seven", 7.5};
+int get_id(struct item *p) { return p->id; }
+int main(void) { get_id(&one); get_id(&solo); return solo.id; }
+"""
+
+
+def test_e2e_struct_layout_prints_untouched_fields(tmp_path):
+    pytest.importorskip("unicorn")
+    gcc = shutil.which("gcc")
+    if not gcc:
+        pytest.skip("gcc not available")
+    (tmp_path / "s.c").write_text(STRUCT_SRC)
+    exe = tmp_path / "s.exe"
+    subprocess.run([gcc, "-O0", "-no-pie", "-fno-stack-protector", "-o", str(exe),
+                    str(tmp_path / "s.c")], check=True)
+    syms = {}
+    for line in subprocess.run(["nm", str(exe)], capture_output=True, text=True).stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            syms[parts[2]] = "0x" + parts[0].lstrip("0")
+    item = {"kind": "struct", "size": 24, "fields": LAYOUT["fields"]}
+    spec = {syms["get_id"]: {"args": {"0": [{"kind": "pointer", "pointee": item}]}}}
+    dt, log = _run(tmp_path, exe, spec, "struct")
+    assert "Struct hints:    applied" in log
+    decl = _decl(dt, "get_id")
+    # get_id reads only ->id; the layout adds the name (a string) and the weight
+    assert "variable arg0[..].off8\n" in decl and "java.lang.String[]" in decl
+    assert "variable arg0[..].off16\n" in decl
+    assert '[ "one" ]' in dt and '[ "seven" ]' in dt
+    base, _ = _run(tmp_path, exe, {}, "nostruct")
+    assert "arg0[..].off8" not in _decl(base, "get_id")
