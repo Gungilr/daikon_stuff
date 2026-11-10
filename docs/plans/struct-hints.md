@@ -250,3 +250,121 @@ DWARF ceilings above.
   - **Out-of-style input:** Ghidra, not IDA.
 - **Ways to recover more of the ceiling:** a model trained on Ghidra output, or
   layouts from a source with whole definitions (headers).
+
+## Is the ±0 an ingestion error? (verification, 2026-11-10)
+
+The ±0 looked suspicious: some of ReSym's types are right, so some gain was
+expected. Three checks, one per place the pipeline could lose information.
+
+### 1. Model input: does the Ghidra → IDA conversion cost ReSym its accuracy?
+
+`resym_selftest.py`: 89 functions from 10 binaries of ReSym's own test set
+(217 labelled parameters). Each was decompiled with Ghidra from the stripped
+binary, converted by `ghidra_to_resym.py`, and scored against ReSym's labels
+next to the same functions' IDA prompts.
+
+| input | exact type | right type class |
+|---|---|---|
+| authors' predictions (IDA code, all variables asked) | 44.7% | 63.6% |
+| local run, IDA code, parameters only asked | 43.8% | 62.7% |
+| local run, **Ghidra converted**, parameters only | 41.9% | 64.1% |
+
+Ghidra's parameter count matched IDA's on all 89 functions. **The conversion
+is not the problem**: the model does as well on converted Ghidra text as on
+IDA text.
+
+### 2. Model output: do correct answers survive `resym_to_hints.py` and the tracer?
+
+`pipe_oracle.py` writes the DWARF truth as C type strings into prediction
+files of the exact format ReSym's answers have, one per prompt, and they are
+converted by the same `resym_to_hints.py`. (ORACLE diagnostic, never a result.)
+
+| matched over baseline (args only, no return hints) | types | types + touched fields |
+|---|---|---|
+| true types fed directly (`hints_from_dwarf.py`) | +33 | +39 |
+| true types **through the ReSym path** | **+26** | **+28** |
+
+Per binary, through the path:
+- **Arrives intact:** IntTest +31, SimpleDisambigStructTest +2, string-arrays +1.
+- **Lost (11 facts):** NestedStructTest +5, StaticArraysTest +1, string-arrays
+  +1, small-test +4.
+  - Cause: the parameter never reaches a prompt. Ghidra's decompiler drops
+    parameters a function does not use (`void bar(struct foo *f) {}` decompiles
+    as `void FUN_00401136(void)`).
+  - Scale: of the 79 reached functions that take parameters, Ghidra shows none
+    for 31.
+
+**The path is not broken.** Correct answers would have produced about +26 to +28.
+
+### 3. Slot audit: where a type matters, what did ReSym say?
+
+`hint_audit.py` over the 110 integer-class argument slots the tracer sampled:
+- **66** reached ReSym (the other 44 are the dropped parameters above).
+- **38** of its answers have the type facts right.
+  - 29 of those are types with nothing to apply: scalars the tracer already
+    prints correctly, struct pointers without a layout, `void*`.
+- **16** slots are ones where the true type changes the tracer's output. This
+  is the whole reachable gain.
+  - **8, the code dereferences the parameter.** ReSym predicted the same
+    effect on 3, and all 3 were applied. They are worth +1 fact in total, with
+    DWARF types too:
+    - in two of them (`print_bits bits`, ArrayTest `returnIntSum b`) the tracer
+      had already declared the element array from the run;
+    - the third (`uppercase s`) turns a pointer into a string.
+
+    On the other 5 it was wrong (`void*`, `time_t*` twice, `uart16x50*`, wrong
+    signedness).
+  - **4, the code never dereferences the parameter.** ReSym was wrong on all 4.
+    Nothing in the function reveals the pointee.
+  - **4, Ghidra dropped the parameter.** Never asked.
+- **IntTest decides the number.** Its one function holds +31 of the +33.
+  Measured one argument at a time:
+  - `u` (`int*`): **+28**;
+  - `a` (`float*`): +2;
+  - `str` (`char*`): +1.
+
+  `returnIntSum` only null-checks `u` and passes it on. ReSym answered `void*`,
+  which is what the code supports.
+
+FieldDecoder, same audit over its 82 accesses:
+- 25 are struct fields by the audit's exact-offset match (which undercounts
+  fields inside embedded arrays).
+- ReSym labelled 25 as struct fields, but only 5 overlap. All 5 are in md5,
+  with the wrong layout.
+- It called the real struct pointers (`TestBuffer*`, `Buffer*`, the struct in
+  `copyComplexStruct`) "not a struct", and saw structs in `int*` and
+  `unsigned char*` parameters.
+
+### Reading
+- **Not an ingestion error.** The input conversion is neutral, and the output
+  path carries correct answers through.
+- **Why correct types still add nothing.** ReSym and the tracer read the same
+  evidence: how the code uses a value.
+  - Where the code dereferences a pointer, ReSym can be right, but the run has
+    already shown the tracer the same thing, exactly.
+  - Where the code does not touch the pointer, a type would add a lot (IntTest's
+    `u`), but ReSym has nothing to read either.
+
+  What is left for a model is priors from realistic context (library calls,
+  idioms), which these small test programs do not have.
+- **What follows from this.** The valuable types belong to parameters that are
+  passed through or unused. Two places hold evidence for them:
+  - the **caller**: `main` builds `stackArray13` and passes it. A model's type
+    for the caller's local could be carried to the callee's parameter.
+  - the **tracer's own run**: the tracer deliberately ignores a function's
+    accesses to its own frame, so `main` filling that array is not credited to
+    the object `u` points at.
+
+### Found along the way (not ReSym, not fixed here)
+- **Float return values are wrong in the trace.** At EXIT, `_read_exit_args`
+  restores the first float argument into the `xmm0` slot, and the return value
+  is then read from that same slot.
+  - Effect: `doubleSub(15, -5246.54)` records `return = 15.0`, where the true
+    result is 5261.54, and Daikon reports `a == return`.
+  - Scope: all 10 float-returning functions the suite reaches (FloatTest ×8,
+    TypesTest ×2).
+  - It predates the hint work, and the soundness audit cannot see it, because
+    the audit checks facts against our own samples.
+- **Float print precision.** Kvasir prints a `float` with 9 digits
+  (`100.345001`); the tracer prints the exact double (`100.34500122070312`).
+  The values agree but the text does not match.
