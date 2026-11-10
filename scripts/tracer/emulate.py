@@ -714,13 +714,37 @@ class Tracer:
                     stats["conflicting layouts"] = stats.get("conflicting layouts", 0) + 1
                 return
             done[site] = key
-            t, extra = type_hints.merge(site, layout, self._types.get(site),
+            obs = self._types.get(site)
+            if stride is None and obs is not None and obs.shape == T_ARRAY \
+                    and not (not obs.elem_struct and layout.get("size")
+                             and obs.size == layout["size"]):
+                # (A scalar "array" exactly the struct's size is the uniform-
+                # tiling guess for an object read at one width, not evidence.)
+                # The run saw an array of these: the layout types its elements
+                # (a pointer into `struct foo g[4]`), never replaces the array.
+                extent = max((f.get("off", 0) + (f.get("size") or 0)
+                              for f in layout.get("fields") or []), default=0)
+                if obs.stride and extent <= obs.stride and (
+                        not layout.get("size") or layout["size"] == obs.stride):
+                    stride, count = obs.stride, obs.count
+                else:
+                    stats["refuted"] = stats.get("refuted", 0) + 1
+                    self.log.verbose(f"  struct hint {site!r} refuted: array of stride "
+                                     f"{obs.stride}, hint size {layout.get('size')}")
+                    return
+            t, extra = type_hints.merge(site, layout, obs,
                                         stride=stride, count=count,
                                         observed_only=self._hint_observed_only)
             if t is None:
                 k = "no observed field" if extra == "no field left" else "refuted"
                 stats[k] = stats.get(k, 0) + 1
                 self.log.verbose(f"  struct hint {site!r} refuted: {extra}")
+                return
+            if obs is not None and obs.shape == "scalar" and stride is None \
+                    and len(t.fields) == 1 and t.fields[0].offset == 0:
+                # One field at +0 over an object the run read as one scalar:
+                # the layout adds no field, only a struct wrapper around it.
+                stats["no new field"] = stats.get("no new field", 0) + 1
                 return
             self._types[site] = t
             stats["applied"] = stats.get("applied", 0) + 1

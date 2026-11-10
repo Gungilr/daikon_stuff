@@ -13,6 +13,9 @@ order (float/double parameters travel in xmm registers and are skipped).
                      globals, arrays of structs and pointers to structs)
     --observed-only  mark the file so the tracer keeps only the hinted fields
                      the run itself accessed (the FieldDecoder-like ceiling)
+    --no-globals     leave out the "globals" section (layouts reach the tracer
+                     only through arguments and returns, as a model that types
+                     parameters, like ReSym's, would provide)
 
 Usage:
     python3 scripts/rea_eval/hints_from_dwarf.py TRUTH.jsonl OUT_DIR
@@ -243,6 +246,7 @@ def struct_hints(path):
 def main(argv):
     structs = "--structs" in argv
     observed = "--observed-only" in argv
+    no_globals = "--no-globals" in argv
     args = [a for a in argv[1:] if not a.startswith("--")]
     src, out_dir = args[:2]
     os.makedirs(out_dir, exist_ok=True)
@@ -251,6 +255,8 @@ def main(argv):
             if not f.endswith(".exe") or f.endswith("_stripped.exe"):
                 continue
             funcs, globs = struct_hints(os.path.join(src, f))
+            if no_globals:
+                globs = {}
             doc = {"source": "DWARF layouts (ORACLE ceiling only)", "functions": funcs,
                    "globals": globs}
             if observed:

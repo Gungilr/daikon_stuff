@@ -252,6 +252,19 @@ def merge(site, layout, observed, *, stride=None, count=None, observed_only=Fals
     if not kept:
         return None, "no field left"
     fields = [f for f, _ in kept]
+    # A hint adds and types fields; it never deletes what the run saw. An
+    # observed field no hinted field overlaps stays (a partial layout, as a
+    # model's prediction usually is, must not hide the rest of the object).
+    for o in obs:
+        if o.kind == ABSTAIN:
+            continue
+        lo = local(o.offset)
+        if stride and lo + o.width > unit:
+            continue
+        if not any(lo < f.offset + f.width and f.offset < lo + o.width for f in fields):
+            fields.append(FieldType(lo, o.width, o.kind, o.signed, o.targets, o.evidence,
+                                    o.stride, o.count, o.elem_kind, o.hint))
+    fields.sort(key=lambda f: f.offset)
     if stride:
         t = TypeInfo(site, ARRAY, stride * (count or 0), fields, stride=stride, count=count,
                      elem_struct=True, hinted=True)

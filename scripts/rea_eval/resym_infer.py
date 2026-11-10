@@ -80,7 +80,7 @@ def main():
             first = line["output"].split(":")[0]
             prompt = line["input"] + first + ":"
             ids = tok.encode(prompt, return_tensors="pt")[:, : 8192 - 1024]
-            n_vars = max(len(asked_vars(line["input"])), 1)
+            n_vars = max(line.get("n_answers") or len(asked_vars(line["input"])), 1)
             cap = 40 * n_vars + 16
             t0 = time.time()
             res = model.generate(input_ids=ids, attention_mask=torch.ones_like(ids),
@@ -98,6 +98,7 @@ def main():
                 capped.append(len(gen) >= cap)
             text = texts[0]
             rec = {"idx": i, "bin": line.get("bin"), "proj": line.get("proj"),
+                   "addr": line.get("addr"),
                    "funname": line.get("funname"), "output": line["output"],
                    "predict": text, "input_tokens": int(ids.size(1)),
                    "capped": capped[0],
