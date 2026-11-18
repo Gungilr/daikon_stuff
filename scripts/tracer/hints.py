@@ -60,7 +60,9 @@ def load_all(path):
         if cands:
             globs[int(a, 16) if isinstance(a, str) else int(a)] = list(cands)
     return {"slots": load(path), "globals": globs,
-            "observed_only": bool(data.get("observed_fields_only"))}
+            "observed_only": bool(data.get("observed_fields_only")),
+            # "field": a kind clash drops that hinted field only, not the layout
+            "field_refute": data.get("refute") == "field"}
 
 
 def effect(c):
@@ -174,7 +176,12 @@ def leaves(layout):
         off, size, k = f.get("off"), f.get("size"), f.get("kind")
         if not isinstance(off, int) or not size:
             continue
-        if k == "int":
+        if k == "unknown":
+            # A field of this width whose kind the source does not know
+            # (TypeForge's `dword` / `qword`): the run decides the kind.
+            out.append((FieldType(off, size, ABSTAIN, evidence=HINT_EVIDENCE, hint="unknown"),
+                        None))
+        elif k == "int":
             out.append((FieldType(off, size, _int_kind(f), f.get("signed") is not False,
                                   evidence=HINT_EVIDENCE), None))
         elif k == "float":
@@ -208,7 +215,8 @@ def _kclass(kind):
     return None
 
 
-def merge(site, layout, observed, *, stride=None, count=None, observed_only=False):
+def merge(site, layout, observed, *, stride=None, count=None, observed_only=False,
+          field_refute=False):
     """(TypeInfo, [(pointer field, nested layout)]) for a hinted layout the
     run does not contradict, or (None, reason). `stride`/`count` make it an array of `layout` structs.
 
@@ -226,6 +234,7 @@ def merge(site, layout, observed, *, stride=None, count=None, observed_only=Fals
         return o % unit if stride and unit else o
 
     by_pos = {(f.offset, f.width): f for f, _ in hl}
+    dropped = set()
     for o in obs:
         if o.kind == ABSTAIN or o.kind == ARRAY_FIELD:
             continue
@@ -235,9 +244,24 @@ def merge(site, layout, observed, *, stride=None, count=None, observed_only=Fals
         h = by_pos.get((off, o.width))
         if h is not None and _kclass(h.kind) and _kclass(o.kind) \
                 and _kclass(h.kind) != _kclass(o.kind):
-            return None, f"field +{off} is {o.kind}, hint says {h.kind}"
+            if not field_refute:
+                return None, f"field +{off} is {o.kind}, hint says {h.kind}"
+            dropped.add((h.offset, h.width))     # drop that field only, keep the rest
     kept = []
     for f, nested in hl:
+        if (f.offset, f.width) in dropped:
+            continue
+        if f.hint == "unknown":
+            same = next((o for o in obs if o.kind != ABSTAIN and local(o.offset) == f.offset
+                         and o.width == f.width), None)
+            if same is not None:
+                kept.append((FieldType(f.offset, f.width, same.kind, same.signed, same.targets,
+                                       same.evidence, same.stride, same.count, same.elem_kind,
+                                       same.hint), None))
+            # else: width only, never printed - claims nothing about the value
+            else:
+                kept.append((f, None))
+            continue
         if observed_only:
             touched = any(local(o.offset) < f.offset + f.width
                           and f.offset < local(o.offset) + o.width for o in obs)
@@ -261,7 +285,8 @@ def merge(site, layout, observed, *, stride=None, count=None, observed_only=Fals
         lo = local(o.offset)
         if stride and lo + o.width > unit:
             continue
-        if not any(lo < f.offset + f.width and f.offset < lo + o.width for f in fields):
+        if not any(lo < f.offset + f.width and f.offset < lo + o.width for f in fields
+                   if f.kind != ABSTAIN):     # a width-only hint hides nothing
             fields.append(FieldType(lo, o.width, o.kind, o.signed, o.targets, o.evidence,
                                     o.stride, o.count, o.elem_kind, o.hint))
     fields.sort(key=lambda f: f.offset)

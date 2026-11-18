@@ -26,6 +26,7 @@ is the research output.
 | [resym-rerank.md](resym-rerank.md) | — | Pick among ReSym's 4 beam candidates using binary evidence ([../RESYM-LOCAL.md](../RESYM-LOCAL.md)) | **pilot**: 2 of 26 contradicted answers replaced (7.7%), both right |
 | [resym-hints.md](resym-hints.md) | — | ReSym parameter types as tracer hints, refuted by the run | **stopped at gate**: perfect types add +37 matched (gate +40); `--type-hints` built |
 | [struct-hints.md](struct-hints.md) | — | Struct layouts as tracer hints (ORACLE ceilings) | **measured**: DWARF touched fields +235 (F1 29.8%), full +533 (F1 34.6%); **ReSym on Ghidra ±0** |
+| [static-type-tools.md](static-type-tools.md) | — | TypeForge and retypd (cross-function static type recovery) as tracer hints | **measured: both ±0** (1,255 = baseline); stack-memory flow and field types missing |
 
 Tier 4 was skipped after measurement, and re-measured after tier 5 landed: the
 range-based classifier in `memmap.py` now gets **7 of 7** pointers right

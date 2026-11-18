@@ -242,3 +242,26 @@ def test_e2e_struct_layout_prints_untouched_fields(tmp_path):
     assert '[ "one" ]' in dt and '[ "seven" ]' in dt
     base, _ = _run(tmp_path, exe, {}, "nostruct")
     assert "arg0[..].off8" not in _decl(base, "get_id")
+
+
+def test_unknown_field_takes_the_runs_kind_or_stays_unprinted():
+    lay = {"kind": "struct", "size": 16, "fields": [
+        {"off": 0, "size": 8, "kind": "unknown"}, {"off": 8, "size": 4, "kind": "unknown"}]}
+    t, _ = hints.merge(("heap", 1), lay, _obs((0, 8, K_PTR, None)))
+    k = {f.offset: f.kind for f in t.fields}
+    assert k[0] == K_PTR                      # the run saw a pointer there
+    assert k[8] == "abstain"                  # never seen: width only, not printed
+
+
+def test_unknown_field_never_refutes_and_hides_nothing():
+    lay = {"kind": "struct", "size": 16, "fields": [{"off": 0, "size": 4, "kind": "unknown"}]}
+    t, _ = hints.merge(("heap", 1), lay, _obs((0, 8, SINT, True)))   # a wide copy over it
+    assert t is not None and any(f.offset == 0 and f.width == 8 for f in t.fields)
+
+
+def test_field_refute_drops_only_the_contradicted_field():
+    clash = _obs((16, 8, SINT, True))         # hint says float at +16
+    assert hints.merge(("heap", 1), LAYOUT, clash)[0] is None
+    t, _ = hints.merge(("heap", 1), LAYOUT, clash, field_refute=True)
+    kinds = {f.offset: f.kind for f in t.fields}
+    assert kinds[0] == SINT and t.fields[1].hint == "cstring" and kinds[16] == SINT

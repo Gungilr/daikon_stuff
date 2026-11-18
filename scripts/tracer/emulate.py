@@ -255,6 +255,7 @@ class Tracer:
         self._hints = {}
         self._hint_globals = {}         # global address -> [candidate layouts]
         self._hint_observed_only = False
+        self._hint_field_refute = False
         self._hint_string_bad = {}
         self._hint_effect = {}
 
@@ -734,7 +735,8 @@ class Tracer:
                     return
             t, extra = type_hints.merge(site, layout, obs,
                                         stride=stride, count=count,
-                                        observed_only=self._hint_observed_only)
+                                        observed_only=self._hint_observed_only,
+                                        field_refute=self._hint_field_refute)
             if t is None:
                 k = "no observed field" if extra == "no field left" else "refuted"
                 stats[k] = stats.get(k, 0) + 1
@@ -2600,6 +2602,7 @@ class Tracer:
                 self._hints = allh["slots"]
                 self._hint_globals = allh["globals"]
                 self._hint_observed_only = allh["observed_only"]
+                self._hint_field_refute = allh["field_refute"]
             else:
                 self.log.info("[!] --type-hints needs --tier 10; ignored")
         all_funcs, self.is_64bit, self.entry_point, self.segments = \
