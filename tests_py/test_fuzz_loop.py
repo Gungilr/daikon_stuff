@@ -35,8 +35,19 @@ def test_compile_relations_orig_and_linear():
 
 def test_unknown_forms_and_missing_variables_are_not_guessed():
     assert I.compile_inv("p", "a[] elements == 0") is None
-    assert I.compile_inv("p", "(x == 1)  ==>  (y == 2)") is None
+    assert I.compile_inv("p", "x == 1 (mod 2)") is None
+    assert I.compile_inv("p", "(a[] elements == 0)  ==>  (y == 2)") is None   # one side unsupported
     assert I.compile_inv("p", "x == y").holds({"x": 1}) is None
+
+
+def test_conditional_invariants():
+    inv = I.compile_inv("p", "(g_a < g_b)  ==>  (return == 1)")
+    assert inv.kind == "implies"
+    assert inv.holds({"g_a": 1, "g_b": 2, "return": 1})
+    assert not inv.holds({"g_a": 1, "g_b": 2, "return": 0})
+    assert inv.holds({"g_a": 3, "g_b": 2, "return": 0})        # condition false
+    eq = I.compile_inv("p", "(x == 0)  <==>  (return == 1)")
+    assert eq.holds({"x": 0, "return": 1}) and not eq.holds({"x": 1, "return": 1})
 
 
 def test_mapping_learns_a_field_only_when_it_is_unambiguous():
