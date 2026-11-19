@@ -11,6 +11,7 @@ would fit topically, because it builds its own throwaway Uc sandbox.
 from __future__ import print_function
 
 import json
+import os
 import struct
 import sys
 
@@ -19,7 +20,7 @@ try:
     from unicorn import (
         Uc, UcError,
         UC_ARCH_X86, UC_MODE_32, UC_MODE_64,
-        UC_HOOK_CODE,
+        UC_HOOK_CODE, UC_HOOK_BLOCK,
         UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
         UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
         UC_HOOK_MEM_FETCH_UNMAPPED, UC_MEM_WRITE,
@@ -252,6 +253,11 @@ class Tracer:
         # --type-hints: candidate types per (func, raw slot), the count of
         # non-null values that were not C strings, and the effect decided at
         # finalize (None = abstain).
+        self.libc_stubs = {}            # --model-libc: PLT address -> name
+        self._program_exit = None
+        self._cov_edges = set()         # --coverage-out
+        self._cov_prev = 0
+        self._cov_lo = self._cov_hi = 0
         self._hints = {}
         self._hint_globals = {}         # global address -> [candidate layouts]
         self._hint_observed_only = False
@@ -308,6 +314,8 @@ class Tracer:
             self.mu.reg_write(UC_X86_REG_RDI, 1)
             self.mu.reg_write(UC_X86_REG_RSI, stack_top - 0x100)
             self.mu.reg_write(UC_X86_REG_RDX, stack_top - 0x200)
+            if getattr(self.args, "program_arg", None) is not None:
+                self._write_argv(stack_top)
         else:
             self.mu.reg_write(UC_X86_REG_ESP, stack_top)
             self.mu.reg_write(UC_X86_REG_EBP, stack_top)
@@ -391,6 +399,106 @@ class Tracer:
         self.arena = Arena(base, size)
         self.memmap.add_region(base, size, "heap")
         self.log.verbose(f"  Heap arena: 0x{base:x} - 0x{base + size:x}")
+
+    def _write_argv(self, stack_top):
+        """--program-arg: a real argv (argv[0] = the binary's name) and an empty
+        envp, written in the page above the initial stack pointer, which the
+        program never uses as stack. RDI = argc, RSI = argv, RDX = envp."""
+        base = stack_top + 0x40
+        args = [os.path.basename(self.args.binary)] + list(self.args.program_arg)
+        n = len(args)
+        ptrs = base
+        strings = base + 8 * (n + 1) + 8 * 1 + 16
+        out = []
+        cur = strings
+        for a in args:
+            b = a.encode("latin-1", "replace") + b"\0"
+            out.append((cur, b))
+            cur += len(b)
+        if cur - stack_top >= 0x1000:
+            raise ValueError("--program-arg strings do not fit in one page")
+        for addr, b in out:
+            self.mu.mem_write(addr, b)
+        table = b"".join(a.to_bytes(8, "little") for a, _ in out) + b"\0" * 8
+        self.mu.mem_write(ptrs, table)
+        envp = ptrs + 8 * (n + 1)
+        self.mu.mem_write(envp, b"\0" * 8)
+        self.mu.reg_write(UC_X86_REG_RDI, n)
+        self.mu.reg_write(UC_X86_REG_RSI, ptrs)
+        self.mu.reg_write(UC_X86_REG_RDX, envp)
+
+    # --model-libc: input-consuming functions computed from emulated memory,
+    # instead of skipped with RAX = 0 ("empty, equal, zero"), which steers the
+    # program down paths it would not take. Everything else is still skipped.
+    LIBC_MODELLED = ("atoi", "atol", "atoll", "strtol", "strtoll", "strtoul", "strtoull",
+                     "strlen", "exit", "_exit", "abort")
+
+    def _c_string(self, addr, limit=4096):
+        raw = self._read_cstring_bytes(addr) if addr else None
+        if raw is None:
+            return None
+        end = raw.find(b"\0")
+        return raw[:end if end >= 0 else min(len(raw), limit)]
+
+    @staticmethod
+    def _parse_c_integer(s, base=10):
+        """(value, chars consumed) as strtol parses: whitespace, sign, digits."""
+        i, n = 0, len(s)
+        while i < n and s[i] in b" \t\n\v\f\r":
+            i += 1
+        neg = False
+        if i < n and s[i] in b"+-":
+            neg = s[i] == ord("-")
+            i += 1
+        if base in (0, 16) and s[i:i + 2].lower() == b"0x":
+            base, i = 16, i + 2
+        elif base == 0:
+            base = 8 if s[i:i + 1] == b"0" else 10
+        start, v = i, 0
+        while i < n:
+            c = chr(s[i]).lower()
+            d = int(c, 36) if c.isalnum() else 99
+            if d >= base:
+                break
+            v = v * base + d
+            i += 1
+        if i == start:
+            return 0, 0
+        return (-v if neg else v), i
+
+    def _handle_libc(self, uc, name, address, size):
+        rdi = uc.reg_read(UC_X86_REG_RDI)
+        result = 0
+        if name in ("exit", "_exit", "abort"):
+            self.log.info(f"\n[+] {name}() called - stopping emulation")
+            self._program_exit = rdi & 0xFF if name != "abort" else 134
+            uc.emu_stop()
+            return
+        if name == "strlen":
+            s = self._c_string(rdi)
+            result = len(s) if s is not None else 0
+        else:
+            s = self._c_string(rdi) or b""
+            base = 10
+            if name.startswith("strto"):
+                base = uc.reg_read(UC_X86_REG_RDX) & 0xFFFFFFFF
+            v, used = self._parse_c_integer(s, base)
+            if name == "atoi":
+                v = ((v + (1 << 31)) % (1 << 32)) - (1 << 31)      # (int)strtol
+            if name.startswith("strto"):
+                endp = uc.reg_read(UC_X86_REG_RSI)
+                if endp:
+                    uc.mem_write(endp, (rdi + used).to_bytes(8, "little"))
+            result = v
+        uc.reg_write(UC_X86_REG_RAX, result & 0xFFFFFFFFFFFFFFFF)
+        uc.reg_write(UC_X86_REG_RIP, address + size)
+
+    def _hook_block_coverage(self, uc, address, size, user_data):
+        """--coverage-out: edges between basic blocks of the binary's own code."""
+        if not (self._cov_lo <= address < self._cov_hi):
+            return
+        self._cov_edges.add((self._cov_prev, address))
+        self._cov_prev = address
 
     def _handle_allocator(self, uc, name, address, size):
         """Emulate an allocator call in place of executing it.
@@ -2129,6 +2237,10 @@ class Tracer:
                 except ValueError:
                     pass
 
+            if target is not None and target in self.libc_stubs:
+                self._handle_libc(uc, self.libc_stubs[target], address, size)
+                return
+
             if (target is not None and self._alloc_enabled()
                     and target in self.alloc_stubs):
                 self._handle_allocator(uc, self.alloc_stubs[target],
@@ -2637,6 +2749,17 @@ class Tracer:
                 self.log.info("  No allocator imports found "
                               "(statically linked, or none used)")
 
+        if getattr(self.args, "model_libc", False):
+            try:
+                stubs = resolve_plt_stubs(self.args.binary)
+            except Exception as e:
+                stubs = {}
+                self.log.error(f"PLT resolution failed: {e}")
+            self.libc_stubs = {a: nm for a, nm in stubs.items() if nm in self.LIBC_MODELLED}
+            if self.libc_stubs:
+                self.log.info("  libc modelled: " + ", ".join(
+                    f"{nm}@0x{a:x}" for a, nm in sorted(self.libc_stubs.items())))
+
         # 2. Apply --include/--exclude filtering
         self.functions = self._filter_functions(all_funcs)
         if not self.functions:
@@ -2727,7 +2850,17 @@ class Tracer:
         # behavior exactly.
         timeout_us = self.args.timeout * 1_000_000 if self.args.timeout else 0
 
-        for layout in range(self.args.layouts):
+        # --program-args-file: many inputs in ONE trace (one evidence pool, one
+        # schema - Daikon rejects files that declare a program point twice
+        # differently, and per-run type inference can).
+        inputs = [None]
+        if getattr(self.args, "program_args_file", None):
+            with open(self.args.program_args_file) as fh:
+                inputs = [json.loads(l) for l in fh if l.strip()]
+        runs = [(argv, layout) for argv in inputs for layout in range(self.args.layouts)]
+        for argv, layout in runs:
+            if argv is not None:
+                self.args.program_arg = [str(a) for a in argv]
             self._layout_index = layout
             stack_base = self.args.stack_base + layout * LAYOUT_STRIDE
             if self.args.layouts > 1:
@@ -2741,6 +2874,12 @@ class Tracer:
             self._layout_insn_count = 0
 
             self.mu.hook_add(UC_HOOK_CODE, self._hook_code)
+            if getattr(self.args, "coverage_out", None) and layout == 0:
+                text = [s for s in self.segments if s["flags"] & 1]
+                if text:
+                    self._cov_lo = min(s["vaddr"] for s in text)
+                    self._cov_hi = max(s["vaddr"] + s["memsz"] for s in text)
+                self.mu.hook_add(UC_HOOK_BLOCK, self._hook_block_coverage)
             if self.args.trace_memory:
                 self.mu.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._hook_mem)
             if self._deref_enabled():
@@ -2766,6 +2905,11 @@ class Tracer:
         # decided and the buffered samples flushed.
         self._finalize()
         self.dtrace.close()
+        if getattr(self.args, "coverage_out", None):
+            with open(self.args.coverage_out, "w") as fh:
+                json.dump({"edges": sorted([a, b] for a, b in self._cov_edges),
+                           "exit": self._program_exit,
+                           "instructions": self.insn_count}, fh)
         if self.json_f is not None:
             self.json_f.close()
 

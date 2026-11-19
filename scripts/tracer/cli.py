@@ -221,6 +221,18 @@ def build_parser():
                            "only to struct types the run already established, "
                            "and never one that contradicts a run-time access.")
 
+    emu.add_argument("--program-arg", action="append", default=None, metavar="ARG",
+                     help="Give the program a real argv: argv[1..] (repeat the flag); "
+                          "argv[0] is the binary's name. Default: argc=1, unwritten argv.")
+    emu.add_argument("--program-args-file", metavar="PATH",
+                     help="Trace MANY inputs into one dtrace: a JSON list of argv[1..] "
+                          "strings per line. One evidence pool, one schema.")
+    emu.add_argument("--model-libc", action="store_true",
+                     help="Compute atoi/atol/strtol*/strlen from emulated memory and stop "
+                          "at exit/_exit/abort, instead of skipping them with RAX=0.")
+    emu.add_argument("--coverage-out", metavar="PATH",
+                     help="Write the basic-block edges executed in the binary's own code "
+                          "(JSON), for coverage-guided fuzzing.")
     heur.add_argument("--type-hints", metavar="PATH",
                       help="Tier 10: JSON of candidate C types per argument/return "
                            "(scripts/tracer/hints.py). A candidate's effect - char* "
